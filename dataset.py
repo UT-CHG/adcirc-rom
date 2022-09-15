@@ -8,6 +8,8 @@ import pandas as pd
 from sklearn.metrics.pairwise import haversine_distances
 from mpi4py import MPI
 from collections import defaultdict
+from features import GridEncoder
+import gc
 
 """
 Create the ML dataset in parallel.
@@ -57,13 +59,16 @@ default_kwargs = {
 class Dataset:
     """A class containing various dataset tools
     """
-
+    
     def _extract_storm_data(self, dirname, hours_before, hours_after, 
                            cutoff_coastal_dist, max_depth, min_depth,
                           r, downsample_factor):
 
         """Convert the underlying forcing and best-track output into something usable for ML.
         """
+
+        # initialize return array
+        res = {}
         df = pd.read_csv(dirname+"/best_track.csv")
 
         # time is in hours since simulation start
@@ -91,43 +96,47 @@ class Dataset:
 
             coords = np.deg2rad(np.column_stack([y, x]))
             landfall_dists = haversine_distances(coords, np.deg2rad(landfall_coord).reshape((1,2))).flatten() * earth_radius
-            include = np.arange(len(x)) % downsample_factor == 0
             mask = ((local_mesh_vars["coastal_dist"] < cutoff_coastal_dist) & (landfall_dists < r) &
-                    (depth < max_depth) & (depth > min_depth) & include)
+                    (depth < max_depth) & (depth > min_depth))
 
-            inds = np.where(mask)[0][::10]
+            inds = np.where(mask)[0][::downsample_factor]
             if not len(inds):
                 return
 
-            pressure = pressure_ds["pressure"][time_inds][:, inds].T
+            pressure = pressure_ds["pressure"][time_inds]
 
         with nc.Dataset(dirname+"/fort.74.nc", "r") as wind_ds:
-            windx = wind_ds["windx"][time_inds][:, inds].T
-            windy = wind_ds["windy"][time_inds][:, inds].T
+            windx = wind_ds["windx"][time_inds]
+            windy = wind_ds["windy"][time_inds]
 
+        magnitude = (windx**2 + windy**2)**.5
+        forcing_vars = {"pressure": pressure, "magnitude": magnitude,
+                        "windx": windx, "windy": windy}
+        
+        encoder = GridEncoder(x, y, resolution=.01,
+                                        bounds=(24, 32, -98, -88))
+
+        for name, arr in forcing_vars.items():
+            for pref, func in {"min": np.min, "max": np.max, "mean": np.mean}.items():
+                stat = func(arr, axis=0)
+                stat_name = pref+"_"+name
+                res[stat_name] = stat[inds]
+                computed_vars = encoder.encode(stat,
+                                               scales=[10, 20, 40],
+                                               outx=x[inds], outy=y[inds],
+                                               name=stat_name)
+                res.update(computed_vars)
+            
         with nc.Dataset(dirname+"/maxele.63.nc", "r") as maxele_ds:
             maxele = maxele_ds["zeta_max"][inds]
 
-        res = {"x": x[inds], "y": y[inds], 
+        res.update({"x": x[inds], "y": y[inds], 
                     "landfall_dist": landfall_dists[inds], "depth": depth[inds],
-                    "windx": windx, "windy": windy, "pressure": pressure,
                     "landfall_location": landfall_coord.reshape((1,2)), "maxele": maxele,
-                "inds": inds}
+                "inds": inds})
 
         for k, arr in local_mesh_vars.items():
             res[k] = arr[inds]
-
-        dt = times[1] - times[0]
-        expected_size = (hours_before+hours_after) / dt
-        #print(expected
-        if len(time_inds) < expected_size:
-            for k in ["pressure", "windx", "windy"]:
-                new_arr = np.full((len(inds), int(expected_size)), np.nan)
-                new_arr[:, :len(time_inds)] = res[k]
-                res[k] = new_arr
-        elif len(time_inds) > expected_size:
-            for k in ["pressure", "windx", "windy"]:
-                res[k] = res[k][:, :int(expected_size)]
 
         return res    
 
@@ -181,7 +190,6 @@ class Dataset:
             if rank == 0:
                 arr[:] = mesh_vars[v]
         comm.Barrier()
-        print(self.mesh_vars["coastal_dist"][0])
             
     def create(self, name, datadir="data", stormsdir="storms", **kwargs):
         """
@@ -227,6 +235,7 @@ class Dataset:
                         continue
                 info["storm"] = np.full(len(info["inds"]), i, dtype=int)
                 for k, v in info.items(): arrs[k].append(v)
+                gc.collect()
 
 
         local_data = {}
@@ -237,6 +246,8 @@ class Dataset:
                 #list of scalars
                 local_data[k] = np.array(v)
 
+        del arrs
+        gc.collect()
         keys = sorted(list(local_data.keys()))
 
         data = {}
@@ -248,20 +259,21 @@ class Dataset:
                 recvbuf = np.empty(buf_shape, dtype=local_data[k].dtype)
                 flatcounts = recvbuf.size // buf_shape[0] * counts
                 recvbuf = recvbuf.flatten()
-                print(k)
+                #print(k)
             else:
                 flatcounts = recvbuf = None
             comm.Gatherv(sendbuf=local_data[k].flatten(), recvbuf=(recvbuf, flatcounts), root=root)
             if rank == root:
                 data[k] = recvbuf.reshape(buf_shape)
                 print(f"Processed {k}", data[k].shape)
+            del local_data[k]
+            gc.collect()
 
-        if rank != root: return
-
+        if rank != root: return        
         with h5py.File(f"{datadir}/datasets/{name}.hdf5", "w") as outds:
             for k, v in data.items():
                 outds[k] = v
-
+            print("Wrote all data items")
             outds["storm_names"] = np.array([os.path.basename(d) for d in dirs], dtype="S")
             for param_name, param_value in params.items():
                 outds.attrs[param_name] = param_value
