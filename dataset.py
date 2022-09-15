@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import haversine_distances
 from mpi4py import MPI
 from collections import defaultdict
-from features import GridEncoder
+from features import GridEncoder, init_shared_features
 import gc
 
 """
@@ -278,6 +278,37 @@ class Dataset:
             for param_name, param_value in params.items():
                 outds.attrs[param_name] = param_value
         
+        def setup(self,
+                  datadir="data",
+                  projectdir=os.path.expandvars("$HOME/NHERI-Published/PRJ-2968")):
+
+            """Setup the local directory for analysis work
+            
+            Should be run once before doing work.
+            This creates the needed folder structure for analysis to work.
+            """
         
+            os.makedirs(datadir, exist_ok=True)
+            os.makedirs(datadir+"/storms", exist_ok=True)
+            os.makedirs(datadir+"/datasets", exist_ok=True)
+            os.makedirs(datadir+"/models", exist_ok=True)
+
+            fema_storms = projectdir+"/storms"
+            for d in os.path.listdir(fema_storms):
+                dirname = fema_storms+"/"+d
+                if os.path.isdir(dirname) and d.startswith("s"):
+                    newdir = datadir+"/storms/"+d,
+                    os.makedirs(newdir, exist_ok=True)
+                    os.system(f"ln -sf {dirname}/*nc {newdir}")
+            
+            # fix best track
+            df = pd.read_csv(projectdir+"/best_tracks.csv", skiprows=[1,2])
+            for idx, group in df.groupby("Storm ID"):
+                group = group[["Central Pressure", "Forward Speed", "Heading", "Holland B1", 
+                    "Radius Max Winds", "Radius Pressure 1", "Storm Latitude", "Storm Longitude"]]
+                group.to_csv(datadir+f"/storms/s{int(idx):03}/best_track.csv", index=False)
+
+            init_shared_features(input_dir = datadir+"/storms/s001", output_dir = datadir)
+                
 if __name__ == "__main__":
     Fire(Dataset)

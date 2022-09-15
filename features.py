@@ -2,6 +2,8 @@ import netCDF4 as nc
 import numpy as np
 from scipy.ndimage import uniform_filter, maximum_filter, minimum_filter
 import h5py
+import os
+import geopandas as gpd
 
 earth_radius = 6731
 
@@ -89,22 +91,45 @@ class GridEncoder:
             
         return res        
 
-if __name__ == "__main__":
+def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
+    """Initialize shared features such as bathy_stats and coastal distances
 
-    scales=[5, 10, 40, 100]
-    with nc.Dataset("data/storms/s001/maxele.63.nc") as ds:
-        
+    input_dir must contain a maxele.63.nc file with grid information
+    the files bathy_stats.hdf5 and coastal_dists.hdf5 will be output to output_dir
+    """
+    
+    with nc.Dataset(datadir+"/maxele.63.nc") as ds:
+
         enc = GridEncoder(ds["x"][:], ds["y"][:],
                         resolution=.01,     
                         bounds= (24,32,-98, -88))
-    
+
         depth = ds["depth"][:]
         stats = enc.encode(depth, scales=scales, name="bathy")
         save_stats(stats, "data/bathy_stats.hdf5")
+        x, y = ds["x"][:], ds["y"][:]
 
-    with nc.Dataset("data/historical_storms/ike/maxele.63.nc") as ike_ds:
-        ike_x = ike_ds["x"][:]
-        ike_y = ike_ds["y"][:]
-        
-    ike_stats = enc.encode(depth, scales=scales, outx = ike_x, outy = ike_y, name="bathy")
-    save_stats(ike_stats, "data/historical_storms/ike/bathy_stats.nc")
+        shoreline = gpd.read_file("Gulf_of_Mexico_GCOOS_Region_with_GSHHS_shorelines__GCOOS_.geojson")
+
+        lats = []
+        lons = []
+
+        for geom in shoreline.iloc[0]["geometry"].geoms:
+            for coord in geom.exterior.coords:
+                lons.append(coord[0])
+                lats.append(coord[1])
+            for interior in geom.interiors:
+                for coord in interior.coords:
+                    lons.append(coord[0])
+                    lats.append(coord[1])
+
+        lons, lats = np.deg2rad(lons), np.deg2rad(lats)
+        from sklearn.neighbors import BallTree
+        tree = BallTree(np.column_stack([lats, lons]), metric="haversine")
+        R = 6731 # radius of earth in km
+        dist, ind = tree.query(np.column_stack([np.deg2rad(y), np.deg2rad(x)]))
+        dist, ind = dist.flatten(), ind.flatten()
+        dist *= R
+
+    with h5py.File(output_dir"/coastal_dist.hdf5", "w") as outds:
+        outds["dist"] = dist
