@@ -6,7 +6,13 @@ import numpy as np
 from global_land_mask import globe
 import pandas as pd
 from sklearn.metrics.pairwise import haversine_distances
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+    have_mpi = True
+except ImportError:
+    print("Warning - could not import MPI - dataset creation will be significantly slower!")
+    have_mpi = False
+
 from collections import defaultdict
 from features import GridEncoder, init_shared_features
 import gc
@@ -53,7 +59,7 @@ default_kwargs = {
     "max_depth":2,
     "min_depth":-4,
     "r":150,
-    "downsample_factor":10
+    "downsample_factor":100
 }
 
 class Dataset:
@@ -157,6 +163,13 @@ class Dataset:
                 for k in bathy_ds.keys():
                     res[k] = bathy_ds[k][:]
 
+        # check consistency
+        num_nodes = None
+        for k, arr in res.items():
+            if num_nodes is None: num_nodes = len(arr)
+            if len(arr) != num_nodes:
+                raise ValueError(f"Inconsistent lengths - arr {k} has length {len(arr)} != {num_nodes}")
+
         return res
         
     def _init_shared_arrs(self, datadir):
@@ -170,10 +183,6 @@ class Dataset:
         itemsize = MPI.DOUBLE.Get_size()
         if rank == root:
             mesh_vars = self._get_mesh_vars(datadir)
-            num_nodes = len(mesh_vars["coastal_dist"])
-            for k, arr in mesh_vars.items():
-                if len(arr) != num_nodes:
-                    raise ValueError(f"Inconsistent lengths - arr {k} has length {len(arr)} != {num_nodes}")
             var_names = list(mesh_vars.keys())
         else:
             num_nodes = 0
@@ -190,15 +199,10 @@ class Dataset:
             if rank == 0:
                 arr[:] = mesh_vars[v]
         comm.Barrier()
-            
-    def create(self, name, datadir="data", stormsdir="storms", **kwargs):
-        """
-        """
 
-        params = default_kwargs.copy()
-        params.update(kwargs)
-
-        arrs = defaultdict(list)
+    def _parallel_create(self, name, datadir, stormsdir, params):
+        """Create a dataset in parallel
+        """
 
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
@@ -206,48 +210,14 @@ class Dataset:
         root = 0    
 
         if rank == root:
-            dirs = []
-            stormsdir = datadir+"/"+stormsdir
-            for d in os.listdir(stormsdir):
-                d = stormsdir+"/"+d
-                if os.path.isdir(d) and "." not in d:
-                    dirs.append(d)
-
-            with h5py.File(datadir+"/coastal_dist.hdf5", "r") as coastal_dist_ds:
-                coastal_dists = coastal_dist_ds["dist"][:]
+            dirs = self._get_storm_dirs(self, datadir, stormsdir)
         else:
             dirs = None
 
         dirs = comm.bcast(dirs, root=root)
         self._init_shared_arrs(datadir)
-        """
-        nnodes = None if rank != root else len(coastal_dists)
-        nnodes = comm.bcast(nnodes, root=root)
-        if rank != root:
-            coastal_dists = np.empty(nnodes, dtype=float)
 
-        comm.Bcast([coastal_dists, MPI.DOUBLE], root=root)"""
-
-        for i in range(rank, len(dirs), size):
-                info = self._extract_storm_data(dirs[i], **params)
-                if info is None:
-                        print(f"Storm {i} missing data.")
-                        continue
-                info["storm"] = np.full(len(info["inds"]), i, dtype=int)
-                for k, v in info.items(): arrs[k].append(v)
-                gc.collect()
-
-
-        local_data = {}
-        for k, v in arrs.items():
-            if isinstance(v[0], np.ndarray):
-                local_data[k] = np.concatenate(v)
-            else:
-                #list of scalars
-                local_data[k] = np.array(v)
-
-        del arrs
-        gc.collect()
+        local_data = self._get_data(dirs, params, inds = range(rank, len(dirs), size))
         keys = sorted(list(local_data.keys()))
 
         data = {}
@@ -269,7 +239,13 @@ class Dataset:
             del local_data[k]
             gc.collect()
 
-        if rank != root: return        
+        if rank != root: return
+        self._save_dataset(name, datadir, data, dirs, params)
+
+    def _save_dataset(self, name, datadir, data, dirs, params):
+        """Write a newly assembled dataset to a file
+        """
+
         with h5py.File(f"{datadir}/datasets/{name}.hdf5", "w") as outds:
             for k, v in data.items():
                 outds[k] = v
@@ -277,38 +253,96 @@ class Dataset:
             outds["storm_names"] = np.array([os.path.basename(d) for d in dirs], dtype="S")
             for param_name, param_value in params.items():
                 outds.attrs[param_name] = param_value
+
+    def _get_storm_dirs(self, datadir, stormsdir):
+        dirs = []
+        dirname = datadir+"/"+stormsdir
+        for d in os.listdir(dirname):
+            d = dirname+"/"+d
+            if os.path.isdir(d) and "." not in d:
+                dirs.append(d)
+
+        return dirs
+
+    def _get_data(self, dirs, params, inds=None):
+        """Aggregate feature data for a set of storms, possible indexed by inds
+        """
         
-        def setup(self,
-                  datadir="data",
-                  projectdir=os.path.expandvars("$HOME/NHERI-Published/PRJ-2968")):
+        arrs = defaultdict(list)
+        if inds is None: inds=range(len(dirs))
+        for i in inds:
+                info = self._extract_storm_data(dirs[i], **params)
+                print(f"Processing storm {i}")
+                if info is None:
+                        print(f"Storm {i} missing data.")
+                        continue
+                info["storm"] = np.full(len(info["inds"]), i, dtype=int)
+                for k, v in info.items(): arrs[k].append(v)
+                gc.collect()
 
-            """Setup the local directory for analysis work
-            
-            Should be run once before doing work.
-            This creates the needed folder structure for analysis to work.
-            """
+
+        local_data = {}
+        for k, v in arrs.items():
+            if isinstance(v[0], np.ndarray):
+                local_data[k] = np.concatenate(v)
+            else:
+                #list of scalars
+                local_data[k] = np.array(v)
+
+        del arrs
+        gc.collect()
+        return local_data
+    
+    
+    def create(self, name, datadir="data", stormsdir="storms", **kwargs):
+        """Create a dataset
+        """
+
+        params = default_kwargs.copy()
+        params.update(kwargs)
+
+        if have_mpi:
+            self._parallel_create(name, datadir, stormsdir, params)
+            return
         
-            os.makedirs(datadir, exist_ok=True)
-            os.makedirs(datadir+"/storms", exist_ok=True)
-            os.makedirs(datadir+"/datasets", exist_ok=True)
-            os.makedirs(datadir+"/models", exist_ok=True)
+        dirs = self._get_storm_dirs(datadir, stormsdir)
+        self.mesh_vars = self._get_mesh_vars(datadir)
+        data = self._get_data(dirs, params)
+        
+        self._save_dataset(name, datadir, data, dirs, params)
+        
+        
+    def setup(self,
+              datadir="data",
+              projectdir=os.path.expandvars("$HOME/NHERI-Published/PRJ-2968")):
 
-            fema_storms = projectdir+"/storms"
-            for d in os.path.listdir(fema_storms):
-                dirname = fema_storms+"/"+d
-                if os.path.isdir(dirname) and d.startswith("s"):
-                    newdir = datadir+"/storms/"+d,
-                    os.makedirs(newdir, exist_ok=True)
-                    os.system(f"ln -sf {dirname}/*nc {newdir}")
-            
-            # fix best track
-            df = pd.read_csv(projectdir+"/best_tracks.csv", skiprows=[1,2])
-            for idx, group in df.groupby("Storm ID"):
-                group = group[["Central Pressure", "Forward Speed", "Heading", "Holland B1", 
-                    "Radius Max Winds", "Radius Pressure 1", "Storm Latitude", "Storm Longitude"]]
-                group.to_csv(datadir+f"/storms/s{int(idx):03}/best_track.csv", index=False)
+        """Setup the local directory for analysis work
 
-            init_shared_features(input_dir = datadir+"/storms/s001", output_dir = datadir)
+        Should be run once before doing work.
+        This creates the needed folder structure for analysis to work.
+        """
+
+        os.makedirs(datadir, exist_ok=True)
+        os.makedirs(datadir+"/storms", exist_ok=True)
+        os.makedirs(datadir+"/datasets", exist_ok=True)
+        os.makedirs(datadir+"/models", exist_ok=True)
+
+        fema_storms = projectdir+"/storms"
+        for d in os.listdir(fema_storms):
+            dirname = fema_storms+"/"+d
+            if os.path.isdir(dirname) and d.startswith("s"):
+                newdir = datadir+"/storms/"+d
+                os.makedirs(newdir, exist_ok=True)
+                os.system(f"ln -sf {dirname}/*nc {newdir}")
+
+        # fix best track
+        df = pd.read_csv(projectdir+"/best_tracks.csv", skiprows=[1,2])
+        for idx, group in df.groupby("Storm ID"):
+            group = group[["Central Pressure", "Forward Speed", "Heading", "Holland B1", 
+                "Radius Max Winds", "Radius Pressure 1", "Storm Latitude", "Storm Longitude"]]
+            group.to_csv(datadir+f"/storms/s{int(idx):03}/best_track.csv", index=False)
+
+        init_shared_features(input_dir = datadir+"/storms/s001", output_dir = datadir)
                 
 if __name__ == "__main__":
     Fire(Dataset)

@@ -98,7 +98,7 @@ def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
     the files bathy_stats.hdf5 and coastal_dists.hdf5 will be output to output_dir
     """
     
-    with nc.Dataset(datadir+"/maxele.63.nc") as ds:
+    with nc.Dataset(input_dir+"/maxele.63.nc") as ds:
 
         enc = GridEncoder(ds["x"][:], ds["y"][:],
                         resolution=.01,     
@@ -131,5 +131,5 @@ def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
         dist, ind = dist.flatten(), ind.flatten()
         dist *= R
 
-    with h5py.File(output_dir"/coastal_dist.hdf5", "w") as outds:
+    with h5py.File(output_dir+"/coastal_dist.hdf5", "w") as outds:
         outds["dist"] = dist
