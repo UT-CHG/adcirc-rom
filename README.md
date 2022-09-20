@@ -4,10 +4,13 @@ The tools can be used both in an HPC and a single-threaded environment.
 
 ## Designsafe Quickstart
 
-1. Start a Jupyter lab session and clone this repository.
+1. Start a Jupyter lab session.
+
 2. Use Jupyter lab to launch a terminal, and in the terminal run the following:
 ```
-pip install netCDF4 sklearn global-land-mask xgboost geopandas scipy h5py
+pip install netCDF4 sklearn global-land-mask xgboost geopandas scipy h5py fire
+git clone https://github.com/UT-CHG/adcirc-rom.git
+cd adcirc-rom
 python3 dataset.py setup
 ```
 
