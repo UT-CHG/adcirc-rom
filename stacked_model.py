@@ -104,6 +104,8 @@ class StackedModel:
 
         x_train_normed = (x_train - xmeans) / xstds
         x_test_normed = (x_test - xmeans) / xstds
+        y_test_class = np.zeros(len(y_test))
+        y_test_class[y_test!=0] = 1
         
         print("Training Classifier")
         if classifier.startswith("nn"):
@@ -119,12 +121,10 @@ class StackedModel:
             clf.compile(loss='binary_crossentropy',
                 optimizer= optimizer,
                 metrics=['accuracy'])
-            clf.fit(x_train_normed, y_train_class, epochs=epochs,
+            clf.fit(x_train_normed, y_train_class, epochs=epochs//2,
                     batch_size=2048, validation_split = 0.2,
                     callbacks = callbacks)
         else:
-            y_test_class = np.zeros(len(y_test))
-            y_test_class[y_test!=0] = 1
             print("Accuracy on Train Data: {:.2f}%".format(clf.score(x_train,y_train_class)*100))
             print("Accuracy on Test Data: {:.2f}%".format(clf.score(x_test,y_test_class)*100))
             print(confusion_matrix(y_test_class, clf.predict(x_test)))
@@ -136,6 +136,15 @@ class StackedModel:
 
         print("Training regressor")
         if regressor.startswith("nn"):
+            #prediction pipline
+            #prediction stage 1 is classification
+            test_stage1_pred = clf.predict(x_test_normed, batch_size=2048)
+            test_stage1_pred = (test_stage1_pred.flatten() > 0.5)
+            print(test_stage1_pred)
+            acc = (test_stage1_pred.astype(int)==y_test_class).mean()
+            print(f"Classification accuracy on test data {acc:.4f}")
+            gc.collect()
+
             loss = tf.keras.losses.MeanSquaredError(reduction="auto")
             optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
             reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2,
@@ -146,13 +155,12 @@ class StackedModel:
                                 batch_size = 2048, epochs=epochs,
                                 validation_split = 0.2, callbacks = [reduce_lr])
             gc.collect()
+
             #prediction pipline
-            #prediction stage 1 is classification
-            test_stage1_pred = clf.predict(x_test_normed)
-            gc.collect()
+            #prediction stage 2 is regression
 
             test_pred = np.zeros(x_test.shape[0])
-            test_pred[(test_stage1_pred!=0).astype('bool').reshape(-1)] = reg.predict(x_test_normed[(test_stage1_pred!=0).reshape(-1),:]).reshape(-1)
+            test_pred[test_stage1_pred] = reg.predict(x_test_normed[test_stage1_pred,:], batch_size=2048).reshape(-1)
 
             gc.collect()
             #Absolute error on predictions

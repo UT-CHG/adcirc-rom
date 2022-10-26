@@ -184,6 +184,7 @@ class Dataset:
         if rank == root:
             mesh_vars = self._get_mesh_vars(datadir)
             var_names = list(mesh_vars.keys())
+            num_nodes = len(mesh_vars[var_names[0]])
         else:
             num_nodes = 0
             mesh_vars = {}
@@ -210,7 +211,7 @@ class Dataset:
         root = 0    
 
         if rank == root:
-            dirs = self._get_storm_dirs(self, datadir, stormsdir)
+            dirs = self._get_storm_dirs(datadir, stormsdir)
         else:
             dirs = None
 
