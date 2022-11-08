@@ -61,7 +61,69 @@ def extract_features(ds, include_latlon=False, exclude_bathy=False):
         mat[i] = ds[name][:]
 
     return mat.T, names            
-            
+
+class CorrelationFilter:
+    """A class to eliminate correlated features
+    """
+
+    def __init__(self, threshold):
+        """Initialize the filter
+        """
+
+        self.threshold = threshold
+    
+    def fit(self, X, y=None):
+        """Determine the features to remove
+        """
+
+        corrs = np.corrcoef(X, rowvar=False)
+        n = corrs.shape[0]
+        keep = np.ones(n, dtype=bool)
+
+        for i in range(n):
+            if not keep[i]: continue
+            for j in range(i+1, n):
+                if not keep[j]: continue
+                if abs(corrs[i,j]) > self.threshold:
+                    keep[j] = 0
+
+        self.cols_to_keep = np.where(keep)[0]
+
+    def transform(self, X):
+        return X[:, self.cols_to_keep]
+
+    def fit_transform(self, X, y=None):
+        self.fit(X)
+        return self.transform(X)
+    
+class FeatureImportanceFilter:
+    """Determine feature importances by training a regressor on a subsample of the data
+    """
+    
+    def __init__(self, max_features=20):
+        """Initialize the transform and set the max number of features to keep
+        """
+
+        self.max_features = max_features
+
+    def fit(self, X, y):
+        model = xgb.XGBRegressor(n_estimators=10,
+                                 importance_type="gain",
+                                 subsample=.5)
+        model.fit(X, y)
+        importances = model.feature_importances_
+        # select the top features based on importance
+        inds = np.argsort(importances)
+        self.cols_to_keep = inds[-self.max_features:]
+
+    def transform(self, X):
+        return X[:, self.cols_to_keep]
+
+    def fit_transform(self, X, y=None):
+        self.fit(X)
+        return self.transform(X)
+        
+        
 class XGBModel:
     """A class to handle loading and saving XGB model files.
     """

@@ -34,7 +34,9 @@ class StackedModel:
             "size":3
         },
         "xgb250": {
-            "n_estimators": 250
+            "n_estimators": 250,
+            "n_jobs": 32,
+            "early_stopping_rounds": 10
         }
     }
     
@@ -124,10 +126,23 @@ class StackedModel:
             clf.fit(x_train_normed, y_train_class, epochs=epochs//2,
                     batch_size=2048, validation_split = 0.2,
                     callbacks = callbacks)
+            test_stage1_pred = clf.predict(x_test_normed, batch_size=2048)
+            test_stage1_pred = (test_stage1_pred.flatten() > 0.5)
+
         else:
+            # split the training data so we can do early stopping
+            x_train_xgb, x_val_xgb, y_train_xgb, y_val_xgb = train_test_split(x_train_normed, y_train_class, test_size=0.2)
+            clf.fit(x_train_xgb, y_train_xgb,
+                    eval_set=[(x_val_xgb, y_val_xgb)],
+                    verbose=True)
+            os.makedirs(modeldir+"/classifier", exist_ok=True)
+            clf.save_model(modeldir+"/classifier/model.xgb")
+            test_stage1_pred = clf.predict(x_test_normed)
             print("Accuracy on Train Data: {:.2f}%".format(clf.score(x_train,y_train_class)*100))
-            print("Accuracy on Test Data: {:.2f}%".format(clf.score(x_test,y_test_class)*100))
-            print(confusion_matrix(y_test_class, clf.predict(x_test)))
+            #print("Accuracy on Test Data: {:.2f}%".format(clf.score(x_test,y_test_class)*100))
+            #print(confusion_matrix(y_test_class, clf.predict(x_test)))
+        acc = (test_stage1_pred.astype(int)==y_test_class).mean()
+        print(f"Classification accuracy on test data {100*acc:.2f}%")
         #train the regression model on non-zero values
         y_filter_index = y_train!=0
         x_train_filter = x_train_normed[y_filter_index].copy()
@@ -136,24 +151,20 @@ class StackedModel:
 
         print("Training regressor")
         if regressor.startswith("nn"):
-            #prediction pipline
-            #prediction stage 1 is classification
-            test_stage1_pred = clf.predict(x_test_normed, batch_size=2048)
-            test_stage1_pred = (test_stage1_pred.flatten() > 0.5)
-            print(test_stage1_pred)
-            acc = (test_stage1_pred.astype(int)==y_test_class).mean()
-            print(f"Classification accuracy on test data {acc:.4f}")
-            gc.collect()
-
             loss = tf.keras.losses.MeanSquaredError(reduction="auto")
             optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
             reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2,
                                           patience=5, min_lr=0.00001)
+            cp = ModelCheckpoint(modeldir+'/regressor', save_best_only=True)
+
             reg.compile(optimizer=optimizer, loss=loss, metrics=["mae"])
             gc.collect()
             history = reg.fit(x_train_filter, y_train_filter,
                                 batch_size = 2048, epochs=epochs,
-                                validation_split = 0.2, callbacks = [reduce_lr])
+                                validation_split = 0.2,
+                              callbacks = [reduce_lr,
+                                           cp
+                                          ])
             gc.collect()
 
             #prediction pipline
@@ -163,9 +174,20 @@ class StackedModel:
             test_pred[test_stage1_pred] = reg.predict(x_test_normed[test_stage1_pred,:], batch_size=2048).reshape(-1)
 
             gc.collect()
-            #Absolute error on predictions
-            error_test = np.abs(y_test.reshape(-1,1) - test_pred.reshape(-1,1))
-            print("Absolute Error on Test Data : {:.2f} m".format(error_test.mean()))
+        else:
+            # split the training data so we can do early stopping
+            x_train_xgb, x_val_xgb, y_train_xgb, y_val_xgb = train_test_split(x_train_filter, y_train_filter, test_size=0.2)
+            reg.fit(x_train_xgb, y_train_xgb,
+                    eval_set=[(x_val_xgb, y_val_xgb)],
+                    verbose=True)
+            os.makedirs(modeldir+"/regressor", exist_ok=True)
+            reg.save_model(modeldir+"/regressor/model.xgb")
+            test_pred = np.zeros(x_test.shape[0])
+            test_pred[test_stage1_pred] = reg.predict(x_test_normed[test_stage1_pred, :])
+        
+        #Absolute error on predictions
+        error_test = np.abs(y_test.flatten() - test_pred.flatten())
+        print("Absolute Error on Test Data : {:.2f} m".format(error_test.mean()))
         
     
     def _get_model(self, name, classifier=True):
@@ -196,5 +218,11 @@ class StackedModel:
         
         return keras.Model(inputs, x)
 
+    def _get_xgb(self, classifier=True, **kwargs):
+        if classifier:
+            return xgb.XGBClassifier(eval_metric="error", **kwargs)
+        else:
+            return xgb.XGBRegressor(eval_metric="mae", **kwargs)
+    
 if __name__ == "__main__":
     Fire(StackedModel)
