@@ -1,20 +1,22 @@
 import h5py
 import os
-from model import extract_features
+from model import extract_features, CorrelationFilter, FeatureImportanceFilter
 import gc
 import xgboost as xgb
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, train_test_split
+from sklearn.metrics import confusion_matrix
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import confusion_matrix
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from keras.callbacks import CSVLogger, ModelCheckpoint
 from fire import Fire
 import numpy as np
+import joblib
+import json
 
 class StackedModel:
     """Similar to the one-shot XGBoost regression Model class
@@ -37,13 +39,19 @@ class StackedModel:
             "n_estimators": 250,
             "n_jobs": 32,
             "early_stopping_rounds": 10
+        },
+        "xgb30": {
+            "n_estimators": 30,
+            "n_jobs": 32,
+            "early_stopping_rounds": 10
         }
+
     }
     
     
     def __init__(self, dataset="default", datadir="data",
                  include_latlon=False, exclude_bathy=False,
-                 split_factor=10, seed=2022):
+                 ):
         """Load in the dataset we will work with
         """
 
@@ -53,61 +61,87 @@ class StackedModel:
                 ds, include_latlon=include_latlon, exclude_bathy=exclude_bathy
             )
             print("Loaded features")
+            print(self._feature_names)
             maxele = ds["maxele"][:]
             maxele[maxele<0] = 0
             self._storm_inds = ds["storm"][:]
             self._maxele = maxele
             self._coords = np.column_stack([ds["x"][:], ds["y"][:]])
             self._storm_names = ds["storm_names"][:]
+            self.feature_values = feature_values
 
         self._datadir = datadir
         self._dataset = dataset
+        print("Loaded data")
 
+    def _split_data(self, split_factor=10, seed=2022):
+        if hasattr(self, "x_train"): return
         np.random.seed(seed)
         dummy_arr = np.empty((len(self._storm_inds), 1))
         fold = GroupKFold(n_splits=split_factor)
         for train_inds, holdout_inds in fold.split(dummy_arr, groups=self._storm_inds):
-            self.x_train = feature_values[train_inds,:]
-            self.x_test = feature_values[holdout_inds,:]
-            self.y_train = maxele[train_inds]
-            self.y_test = maxele[holdout_inds]
+            self.x_train = self.feature_values[train_inds,:]
+            self.x_test = self.feature_values[holdout_inds,:]
+            self.y_train = self._maxele[train_inds]
+            self.y_test = self._maxele[holdout_inds]
+            self.holdout_inds = holdout_inds
             break
 
-        del feature_values
-        gc.collect()
-        print("Loaded and split data.")
-
+        print("Split data.")
+    
+    def _get_modeldir(self, modelname):
+        return f"{self._datadir}/models/{modelname}"        
     
     def train(self, classifier="nn1", regressor="nn1",
-             epochs=100):
+             epochs=100, preprocess=None, modelname=None,
+             pca_components=50, correlation_threshold=.9):
         """Train the stacked model
         """
-        
-        modelname = f"stacked_{classifier}_{regressor}_{self._dataset}"
-        modeldir = f"{self._datadir}/models/{modelname}"
-        if not os.path.exists(modeldir): os.makedirs(modeldir, exist_ok=True)
-        
+
         if classifier not in self.supported_models:
             raise ValueError(f"Unsupported classifier {classifier}!")
         if regressor not in self.supported_models:
             raise ValueError(f"Unsupported regressor {regressor}!")
-    
-        clf = self._get_model(classifier, classifier=True)      
-        reg = self._get_model(regressor, classifier=False)
+        
+        if modelname is None:
+            modelname = f"stacked_{classifier}_{regressor}_{self._dataset}"
+        modeldir = self._get_modeldir(modelname)
+        if not os.path.exists(modeldir): os.makedirs(modeldir, exist_ok=True)
+        
+        self._split_data()
+        
         x_train, y_train = self.x_train, self.y_train
         x_test, y_test = self.x_test, self.y_test
     
+        transforms = []
+        if preprocess == "pca":
+            transforms.append(("pca", PCA(n_components=pca_components)))
+        elif preprocess == "importance":
+            transforms.append(("feature_importance",
+                               FeatureImportanceFilter()))
+        elif preprocess == "correlation":
+            transforms.append(("corr", CorrelationFilter(threshold=correlation_threshold)))
+        elif preprocess is not None:
+            raise ValueError(f"Unrecognized preprocess scheme {preprocess}")
+
+        transforms.append(("scaler", StandardScaler()))
+        pipeline = Pipeline(transforms)
+        
         y_train_class = np.zeros(len(y_train))
         y_train_class[y_train!=0] = 1
-        xmeans = np.mean(x_train, axis=0)
-        # print("xmeans", xmeans)
-        xstds = np.std(x_train, axis=0, ddof=1)
-        # print("xstds", xstds)
-
-        x_train_normed = (x_train - xmeans) / xstds
-        x_test_normed = (x_test - xmeans) / xstds
+        x_train_normed = pipeline.fit_transform(x_train, y_train)
+        x_test_normed = pipeline.transform(x_test)
         y_test_class = np.zeros(len(y_test))
         y_test_class[y_test!=0] = 1
+
+        # save preprocesse data
+        preproc_file = modeldir+"/preprocess_joblib"
+        joblib.dump(pipeline, preproc_file)
+    
+        num_features = x_train_normed.shape[1]
+        clf = self._get_model(classifier, num_features=num_features, classifier=True)      
+        reg = self._get_model(regressor, num_features=num_features, classifier=False)
+
         
         print("Training Classifier")
         if classifier.startswith("nn"):
@@ -137,10 +171,10 @@ class StackedModel:
                     verbose=True)
             os.makedirs(modeldir+"/classifier", exist_ok=True)
             clf.save_model(modeldir+"/classifier/model.xgb")
-            test_stage1_pred = clf.predict(x_test_normed)
-            print("Accuracy on Train Data: {:.2f}%".format(clf.score(x_train,y_train_class)*100))
-            #print("Accuracy on Test Data: {:.2f}%".format(clf.score(x_test,y_test_class)*100))
-            #print(confusion_matrix(y_test_class, clf.predict(x_test)))
+            test_stage1_pred = clf.predict(x_test_normed).astype(bool)
+
+            print(confusion_matrix(y_test_class, clf.predict(x_test_normed)))
+        
         acc = (test_stage1_pred.astype(int)==y_test_class).mean()
         print(f"Classification accuracy on test data {100*acc:.2f}%")
         #train the regression model on non-zero values
@@ -187,19 +221,31 @@ class StackedModel:
         
         #Absolute error on predictions
         error_test = np.abs(y_test.flatten() - test_pred.flatten())
-        print("Absolute Error on Test Data : {:.2f} m".format(error_test.mean()))
+        mae = error_test.mean()
+        print("Absolute Error on Test Data : {:.2f} m".format(mae))
+        res = {"accuracy": acc, "mae": mae}
+        with open(modeldir+"/results.json", "w") as fp:
+            json.dump(res, fp)
         
+        # Save the predictions for later plotting
+        with h5py.File(modeldir+"/test_preds.hdf5", "w") as outds:
+            outds["test_pred"] = test_pred
+            outds["storm_inds"] = self._storm_inds[self.holdout_inds]
+            outds["coords"] = self._coords[self.holdout_inds]
+            outds["maxele"] = y_test
+        
+        return res
     
-    def _get_model(self, name, classifier=True):
+    def _get_model(self, name, num_features, classifier=True):
         params = self.supported_models[name]
         params["classifier"] = classifier
         if name.startswith("nn"):
-            return self._get_nn(**params)
+            return self._get_nn(num_features=num_features, **params)
         elif name.startswith("xgb"):
             return self._get_xgb(**params)
     
-    def _get_nn(self, size=1, classifier=True):
-        inputs = keras.Input(shape=self.x_train.shape[1])
+    def _get_nn(self, num_features, size=1, classifier=True):
+        inputs = keras.Input(shape=num_features)
         initial_width = width = 256
         x = layers.Dense(initial_width, activation="relu")(inputs)
 
@@ -223,6 +269,55 @@ class StackedModel:
             return xgb.XGBClassifier(eval_metric="error", **kwargs)
         else:
             return xgb.XGBRegressor(eval_metric="mae", **kwargs)
+    
+    def predict(self, modelname, test_only=False):
+        """Generate predictions for the given dataset
+
+        If test_only is True, assume this is the original dataset the model was trained with
+        and regenerate predictions for the test set. Otherwise, generated named predictions 
+        for the entire datset.
+        """
+    
+        # load model
+        modeldir = self._get_modeldir(modelname)
+        # for now we just support neural nets
+        classifier = keras.models.load_model(modeldir+"/classifier")
+        regressor = keras.models.load_model(modeldir+"/regressor")
+        pipeline = joblib.load(modeldir+"/preprocess_joblib")
+        if test_only:
+            self._split_data()
+            X, y = self.x_test, self.y_test
+            coords = self._coords[self.holdout_inds]
+            storm_inds = self._storm_inds[self.holdout_inds]
+        else:
+            X, y = self.feature_values, self._maxele
+            coords = self._coords
+            storm_inds = self._storm_inds
+        
+        X = pipeline.transform(X)
+        inundation_flag = (
+            classifier.predict(X, batch_size=2048).reshape(-1) > .5
+        ).astype(bool)
+
+        acc = (inundation_flag == (y!=0)).mean()
+        print(f"Classification accuracy {100*acc:2f}")
+        elevations = np.zeros(X.shape[0])
+        elevations[inundation_flag] = regressor.predict(X[inundation_flag],
+                                                       batch_size=2048).reshape(-1)
+        mae = np.abs((elevations-y)).mean()
+        rmse = ((elevations-y)**2).mean() ** .5
+        print(f"mae: {mae}, rmse: {rmse}")
+        
+        outname = "test_preds.hdf5" if test_only else f"{self._dataset}_preds.hdf5"
+        with h5py.File(modeldir+"/"+outname, "w") as outds:
+            if test_only:
+                outds["test_pred"] = elevations
+            else:
+                outds["pred"] = elevations
+            
+            outds["coords"] = coords
+            outds["storm_inds"] = storm_inds
+            outds["maxele"] = y
     
 if __name__ == "__main__":
     Fire(StackedModel)

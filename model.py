@@ -93,14 +93,14 @@ class CorrelationFilter:
         return X[:, self.cols_to_keep]
 
     def fit_transform(self, X, y=None):
-        self.fit(X)
+        self.fit(X, y)
         return self.transform(X)
     
 class FeatureImportanceFilter:
     """Determine feature importances by training a regressor on a subsample of the data
     """
     
-    def __init__(self, max_features=20):
+    def __init__(self, max_features=50):
         """Initialize the transform and set the max number of features to keep
         """
 
@@ -109,6 +109,7 @@ class FeatureImportanceFilter:
     def fit(self, X, y):
         model = xgb.XGBRegressor(n_estimators=10,
                                  importance_type="gain",
+                                 n_jobs=32,
                                  subsample=.5)
         model.fit(X, y)
         importances = model.feature_importances_
@@ -119,8 +120,8 @@ class FeatureImportanceFilter:
     def transform(self, X):
         return X[:, self.cols_to_keep]
 
-    def fit_transform(self, X, y=None):
-        self.fit(X)
+    def fit_transform(self, X, y):
+        self.fit(X, y)
         return self.transform(X)
         
         
