@@ -281,8 +281,6 @@ class StackedModel:
         # load model
         modeldir = self._get_modeldir(modelname)
         # for now we just support neural nets
-        classifier = keras.models.load_model(modeldir+"/classifier")
-        regressor = keras.models.load_model(modeldir+"/regressor")
         pipeline = joblib.load(modeldir+"/preprocess_joblib")
         if test_only:
             self._split_data()
@@ -295,15 +293,30 @@ class StackedModel:
             storm_inds = self._storm_inds
         
         X = pipeline.transform(X)
-        inundation_flag = (
-            classifier.predict(X, batch_size=2048).reshape(-1) > .5
-        ).astype(bool)
+        
+        if os.path.exists(modeldir+"/classifier/model.xgb"):
+            classifier = xgb.XGBClassifier()
+            classifier.load_model(modeldir+"/classifier/model.xgb")
+            inundation_flag = classifier.predict(X).astype(bool)
+        else:
+            classifier = keras.models.load_model(modeldir+"/classifier")        
+            inundation_flag = (
+                classifier.predict(X, batch_size=2048).reshape(-1) > .5
+            ).astype(bool)
 
         acc = (inundation_flag == (y!=0)).mean()
         print(f"Classification accuracy {100*acc:2f}")
         elevations = np.zeros(X.shape[0])
-        elevations[inundation_flag] = regressor.predict(X[inundation_flag],
+        
+        if os.path.exists(modeldir+"/regressor/model.xgb"):
+            regressor = xgb.XGBRegressor()
+            regressor.load_model(modeldir+"/regressor/model.xgb")
+            elevations[inundation_flag] = regressor.predict(X[inundation_flag])
+        else:
+            regressor = keras.models.load_model(modeldir+"/regressor")
+            elevations[inundation_flag] = regressor.predict(X[inundation_flag],
                                                        batch_size=2048).reshape(-1)
+        
         mae = np.abs((elevations-y)).mean()
         rmse = ((elevations-y)**2).mean() ** .5
         print(f"mae: {mae}, rmse: {rmse}")
