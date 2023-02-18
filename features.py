@@ -91,7 +91,11 @@ class GridEncoder:
             
         return res        
 
-def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
+def init_shared_features(input_dir, output_dir="data",
+                         scales=[5, 10, 40, 100],
+                         bounds=(24,32,-98, -88),
+                         coastfile="gulf_coast.geojson"
+                        ):
     """Initialize shared features such as bathy_stats and coastal distances
 
     input_dir must contain a maxele.63.nc file with grid information
@@ -102,14 +106,14 @@ def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
 
         enc = GridEncoder(ds["x"][:], ds["y"][:],
                         resolution=.01,     
-                        bounds= (24,32,-98, -88))
+                        bounds= bounds)
 
         depth = ds["depth"][:]
         stats = enc.encode(depth, scales=scales, name="bathy")
-        save_stats(stats, "data/bathy_stats.hdf5")
+        save_stats(stats, output_dir+"/bathy_stats.hdf5")
         x, y = ds["x"][:], ds["y"][:]
 
-        shoreline = gpd.read_file("Gulf_of_Mexico_GCOOS_Region_with_GSHHS_shorelines__GCOOS_.geojson")
+        shoreline = gpd.read_file(coastfile)
 
         lats = []
         lons = []
@@ -126,10 +130,9 @@ def init_shared_features(input_dir, output_dir, scales=[5, 10, 40, 100]):
         lons, lats = np.deg2rad(lons), np.deg2rad(lats)
         from sklearn.neighbors import BallTree
         tree = BallTree(np.column_stack([lats, lons]), metric="haversine")
-        R = 6731 # radius of earth in km
         dist, ind = tree.query(np.column_stack([np.deg2rad(y), np.deg2rad(x)]))
         dist, ind = dist.flatten(), ind.flatten()
-        dist *= R
+        dist *= earth_radius
 
     with h5py.File(output_dir+"/coastal_dist.hdf5", "w") as outds:
         outds["dist"] = dist

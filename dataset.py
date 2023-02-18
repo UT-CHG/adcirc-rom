@@ -59,7 +59,8 @@ default_kwargs = {
     "max_depth":2,
     "min_depth":-4,
     "r":150,
-    "downsample_factor":100
+    "downsample_factor":100,
+    "bounds": (24, 32, -98, -88)
 }
 
 class Dataset:
@@ -68,19 +69,27 @@ class Dataset:
     
     def _extract_storm_data(self, dirname, hours_before, hours_after, 
                            cutoff_coastal_dist, max_depth, min_depth,
-                          r, downsample_factor):
+                          r, downsample_factor, bounds):
 
         """Convert the underlying forcing and best-track output into something usable for ML.
         """
 
         # initialize return array
         res = {}
-        df = pd.read_csv(dirname+"/best_track.csv")
 
-        # time is in hours since simulation start
-        time, landfall_coord = determine_landfall(df)
-        if time is None:
-            return
+        trackfile = dirname+"/best_track.csv"
+        if not os.path.exists(trackfile):
+            print("No best-track file found - not performing temporal localization!")
+            print(f"Spatial localization will be performed with the bounds {bounds}")
+            time = 0
+            hours_after = np.inf
+            landfall_coord = None
+        else:
+            df = pd.read_csv(trackfile)
+            # time is in hours since simulation start
+            time, landfall_coord = determine_landfall(df)
+            if time is None:
+                return
 
         # precomputed mesh variables like distance to coast and bathymetry stats
         local_mesh_vars = self._get_mesh_vars(dirname)
@@ -99,11 +108,17 @@ class Dataset:
 
             x = pressure_ds["x"][:]
             y = pressure_ds["y"][:]
+            mask = (
+                (local_mesh_vars["coastal_dist"] < cutoff_coastal_dist) &
+                (depth < max_depth) & (depth > min_depth) &
+                (x <= bounds[3]) & (x >= bounds[2]) &
+                (y <= bounds[1]) & (y >= bounds[0])
+            )
 
-            coords = np.deg2rad(np.column_stack([y, x]))
-            landfall_dists = haversine_distances(coords, np.deg2rad(landfall_coord).reshape((1,2))).flatten() * earth_radius
-            mask = ((local_mesh_vars["coastal_dist"] < cutoff_coastal_dist) & (landfall_dists < r) &
-                    (depth < max_depth) & (depth > min_depth))
+            if landfall_coord is not None:
+                coords = np.deg2rad(np.column_stack([y, x]))
+                landfall_dists = haversine_distances(coords, np.deg2rad(landfall_coord).reshape((1,2))).flatten() * earth_radius
+                mask &= (landfall_dists < r)
 
             inds = np.where(mask)[0][::downsample_factor]
             if not len(inds):
@@ -119,8 +134,12 @@ class Dataset:
         forcing_vars = {"pressure": pressure, "magnitude": magnitude,
                         "windx": windx, "windy": windy}
         
+        if os.path.exists(dirname+"/fort.93.nc"):
+            with nc.Dataset(dirname+"/fort.93.nc") as ice_ds:
+                forcing_vars["iceaf"] = ice_ds["iceaf"][time_inds]
+        
         encoder = GridEncoder(x, y, resolution=.01,
-                                        bounds=(24, 32, -98, -88))
+                                        bounds=bounds)
 
         for name, arr in forcing_vars.items():
             for pref, func in {"min": np.min, "max": np.max, "mean": np.mean}.items():
@@ -137,9 +156,16 @@ class Dataset:
             maxele = maxele_ds["zeta_max"][inds]
 
         res.update({"x": x[inds], "y": y[inds], 
-                    "landfall_dist": landfall_dists[inds], "depth": depth[inds],
-                    "landfall_location": landfall_coord.reshape((1,2)), "maxele": maxele,
+                     "depth": depth[inds],
+                     "maxele": maxele,
                 "inds": inds})
+
+        if landfall_coord is not None:
+            res.update({
+                "landfall_dist": landfall_dists[inds],
+                "landfall_location": landfall_coord.reshape((1,2)),
+                }
+            )
 
         for k, arr in local_mesh_vars.items():
             res[k] = arr[inds]
@@ -261,6 +287,9 @@ class Dataset:
         for d in os.listdir(dirname):
             d = dirname+"/"+d
             if os.path.isdir(d) and "." not in d:
+                # ensemble outputs subdirectory
+                if os.path.exists(d+"/outputs"):
+                    d = d+"/outputs"
                 dirs.append(d)
 
         return dirs

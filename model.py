@@ -51,7 +51,8 @@ def extract_features(ds, include_latlon=False, exclude_bathy=False):
         if ((not exclude_bathy and var.startswith("bathy")) 
             or var in ["coastal_dist", "landfall_dist", "depth"]
             or (include_latlon and var in ["x", "y"])
-            or any([k in var for k in ["wind", "pressure", "magnitude"]])
+            or var.startswith("amplitude")
+            or any([k in var for k in ["wind", "pressure", "magnitude", "iceaf"]])
            ):
             names.append(var)
 

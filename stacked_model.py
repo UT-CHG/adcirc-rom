@@ -44,8 +44,8 @@ class StackedModel:
             "n_estimators": 30,
             "n_jobs": 32,
             "early_stopping_rounds": 10
-        }
-
+        },        
+        "dummy": {}
     }
     
     
@@ -163,7 +163,7 @@ class StackedModel:
             test_stage1_pred = clf.predict(x_test_normed, batch_size=2048)
             test_stage1_pred = (test_stage1_pred.flatten() > 0.5)
 
-        else:
+        elif classifier.startswith("xgb"):
             # split the training data so we can do early stopping
             x_train_xgb, x_val_xgb, y_train_xgb, y_val_xgb = train_test_split(x_train_normed, y_train_class, test_size=0.2)
             clf.fit(x_train_xgb, y_train_xgb,
@@ -174,11 +174,17 @@ class StackedModel:
             test_stage1_pred = clf.predict(x_test_normed).astype(bool)
 
             print(confusion_matrix(y_test_class, clf.predict(x_test_normed)))
+        elif classifier == "dummy":
+            # don't perform classification
+            test_stage1_pred = np.ones(len(x_test_normed)).astype(bool)
         
         acc = (test_stage1_pred.astype(int)==y_test_class).mean()
         print(f"Classification accuracy on test data {100*acc:.2f}%")
         #train the regression model on non-zero values
-        y_filter_index = y_train!=0
+        if classifier == "dummy":
+            y_filter_index = np.ones(len(y_train)).astype(bool)
+        else:
+            y_filter_index = y_train!=0
         x_train_filter = x_train_normed[y_filter_index].copy()
         y_train_filter = y_train[y_filter_index].copy()
         gc.collect()
@@ -222,8 +228,9 @@ class StackedModel:
         #Absolute error on predictions
         error_test = np.abs(y_test.flatten() - test_pred.flatten())
         mae = error_test.mean()
-        print("Absolute Error on Test Data : {:.2f} m".format(mae))
-        res = {"accuracy": acc, "mae": mae}
+        rmse = (error_test**2).mean() ** .5
+        res = {"accuracy": acc, "mae": mae, "rmse": rmse}
+        print(res)
         with open(modeldir+"/results.json", "w") as fp:
             json.dump(res, fp)
         
@@ -298,6 +305,8 @@ class StackedModel:
             classifier = xgb.XGBClassifier()
             classifier.load_model(modeldir+"/classifier/model.xgb")
             inundation_flag = classifier.predict(X).astype(bool)
+        elif "dummy" in modeldir:
+            inundation_flag = np.ones(X.shape[0]).astype(bool)
         else:
             classifier = keras.models.load_model(modeldir+"/classifier")        
             inundation_flag = (
