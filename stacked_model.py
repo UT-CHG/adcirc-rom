@@ -51,6 +51,7 @@ class StackedModel:
     
     def __init__(self, dataset="default", datadir="data",
                  include_latlon=False, exclude_bathy=False,
+                 ordered_split=False
                  ):
         """Load in the dataset we will work with
         """
@@ -72,11 +73,25 @@ class StackedModel:
 
         self._datadir = datadir
         self._dataset = dataset
+        self._ordered_split = ordered_split
         print("Loaded data")
 
     def _split_data(self, split_factor=10, seed=2022):
         if hasattr(self, "x_train"): return
         np.random.seed(seed)
+        if self._ordered_split:
+            unique_storms = np.unique(self._storm_inds)
+            np.sort(unique_storms)
+            nunique = len(unique_storms)
+            pivot = unique_storms[int((1-1./split_factor) * nunique)]
+            print(f"Storms > {pivot} will be used for testing")
+            train_mask = self._storm_inds <= pivot
+            test_mask = ~train_mask
+            self.holdout_inds = np.where(test_mask)[0]
+            self.x_train, self.y_train = self.feature_values[train_mask], self._maxele[train_mask]
+            self.x_test, self.y_test = self.feature_values[test_mask], self._maxele[test_mask]
+            return
+            
         dummy_arr = np.empty((len(self._storm_inds), 1))
         fold = GroupKFold(n_splits=split_factor)
         for train_inds, holdout_inds in fold.split(dummy_arr, groups=self._storm_inds):
@@ -133,6 +148,8 @@ class StackedModel:
         x_test_normed = pipeline.transform(x_test)
         y_test_class = np.zeros(len(y_test))
         y_test_class[y_test!=0] = 1
+        x_train_normed[~np.isfinite(x_train_normed)] = 0
+        x_test_normed[~np.isfinite(x_test_normed)] = 0
 
         # save preprocesse data
         preproc_file = modeldir+"/preprocess_joblib"
