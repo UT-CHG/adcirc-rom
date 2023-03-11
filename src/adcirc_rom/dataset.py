@@ -1,3 +1,8 @@
+"""
+Datasets
+
+Setup and create datasets.
+"""
 import os
 
 import h5py
@@ -21,14 +26,40 @@ except ImportError:
 import gc
 from collections import defaultdict
 
-from features import GridEncoder, init_shared_features
+from adcirc_rom.features import GridEncoder, init_shared_features
 
-"""
-Create the ML dataset in parallel.
-"""
+earth_radius = 6731
 
 
 def determine_landfall(track_df):
+    """
+    Determine Landfal
+
+    Compute the landfall time and location of a storm based on its track data.
+    If the track data includes the "Hours" column, it is used
+    to determine the time of landfall. Otherwise, the function assumes that the
+    time of landfall is evenly spaced between the points in the track data. The
+    function first checks whether the storm made landfall in the Gulf of
+    Mexico, between latitudes 24 and 31 degrees and longitudes -98 and -88
+    degrees. If it did, the function uses linear interpolation to determine the
+    exact time and location of landfall.
+
+    Parameters
+    ----------
+    track_df : pandas DataFrame
+        A DataFrame containing the storm's track data, including columns
+        "Storm Latitude", "Storm Longitude", and optionally "Hours".
+
+    Returns
+    -------
+    tuple or None
+        A tuple containing the landfall time (in hours) and location (latitude,
+        longitude) of the storm, or None if the storm did not make landfall.
+
+    Notes
+    -----
+
+    """
     track_coords = track_df[["Storm Latitude", "Storm Longitude"]].values
     if "Hours" in track_df.columns:
         hours = track_df["Hours"]
@@ -55,21 +86,6 @@ def determine_landfall(track_df):
         if globe.is_land(*point):
             return (1 - lamb) * hours[t - 1] + lamb * hours[t], point
     return None, None
-
-
-earth_radius = 6731
-
-
-default_kwargs = {
-    "hours_before": 6,
-    "hours_after": 6,
-    "cutoff_coastal_dist": 30,
-    "max_depth": 2,
-    "min_depth": -4,
-    "r": 150,
-    "downsample_factor": 100,
-    "bounds": (24, 32, -98, -88),
-}
 
 
 class Dataset:
@@ -219,7 +235,6 @@ class Dataset:
 
         bathy_file = dirname + "/bathy_stats.hdf5"
         if os.path.exists(bathy_file):
-            bathy_stats = {}
             with h5py.File(bathy_file) as bathy_ds:
                 for k in bathy_ds.keys():
                     res[k] = bathy_ds[k][:]
@@ -371,11 +386,64 @@ class Dataset:
         gc.collect()
         return local_data
 
-    def create(self, name, datadir="data", stormsdir="storms", **kwargs):
-        """Create a dataset"""
+    def create(self,
+               name,
+               datadir="data",
+               stormsdir="storms",
+               hours_before=6,
+               hours_after=6,
+               cutoff_coastal_dist=30,
+               max_depth=2,
+               min_depth=-4,
+               r=150,
+               downsample_factor=100,
+               bounds=(24, 32, -98, -88),
+               ):
+        """
+        Create
 
-        params = default_kwargs.copy()
-        params.update(kwargs)
+        Creates a new dataset by loading and processing storm data stored in
+        the directory specified by `datadir`. The processed data is then stored
+        in a format that is suitable for use with the model.py library and
+        entrypoints to train and validate models.
+
+        Parameters
+        ----------
+        name : str
+            The name of the dataset to create.
+        datadir : str, optional
+            The path to the directory where the dataset will be stored.
+            Default is "data".
+        stormsdir : str, optional
+            The name of the directory that contains the storm data.
+            Default is "storms".
+        **kwargs
+            Additional keyword arguments for configuring the dataset creation
+            process.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        With the default settings, dataset creation in a serial environment
+        (i.e. Designsafe jupyter) will take a few hours due to the lack of MPI
+        support and the size of the data to be processed. The dataset
+        generation script supports parallization with MPI - and is
+        significantly faster when run on HPC resources such as TACC.
+        """
+
+        params = {
+            "hours_before": hours_before,
+            "hours_after": hours_after,
+            "cutoff_coastal_dist": cutoff_coastal_dist,
+            "max_depth": max_depth,
+            "min_depth": min_depth,
+            "r": r,
+            "downsample_factor": downsample_factor,
+            "bounds": bounds,
+        }
 
         if have_mpi:
             self._parallel_create(name, datadir, stormsdir, params)
@@ -392,10 +460,34 @@ class Dataset:
         datadir="data",
         projectdir=os.path.expandvars("$HOME/NHERI-Published/PRJ-2968"),
     ):
-        """Setup the local directory for analysis work
+        """
+        Setup
 
-        Should be run once before doing work.
-        This creates the needed folder structure for analysis to work.
+        Setup the needed folder structure for analysis to work with the
+        subdirectories:
+          - datasets: The datasets directory is used for storing
+          machine-learning ready datasets.
+          - storms:The storms directory will contain the raw ADCIRC input
+          (note when run within the DesignSafe environment this directory will
+          be prepopulated with a dataset of 446 synthetic ADCIRC simulations).
+          - models: Finally, the models dataset is used for storing saved ML
+          models and predictions.
+
+        Parameters
+        ----------
+        datadir : str, optional
+            The data directory to be created, by default "data".
+        projectdir : str, optional
+            The project directory, by default
+            os.path.expandvars("$HOME/NHERI-Published/PRJ-2968").
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        Should be run once before doing work (running create, train. etc.)
         """
 
         os.makedirs(datadir, exist_ok=True)

@@ -1,5 +1,5 @@
 """
-    Setup file for adcirc-rom-test.
+    Setup file for adcirc-rom.
     Use setup.cfg to configure your project.
 
     This file was generated with PyScaffold 4.4.
