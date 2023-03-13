@@ -4,6 +4,7 @@ Datasets
 Setup and create datasets.
 """
 import os
+import pdb
 
 import h5py
 import netCDF4 as nc
@@ -25,6 +26,10 @@ except ImportError:
 
 import gc
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Union
+
+from alive_progress import alive_bar
 
 from adcirc_rom.features import GridEncoder, init_shared_features
 
@@ -281,7 +286,7 @@ class Dataset:
                 arr[:] = mesh_vars[v]
         comm.Barrier()
 
-    def _parallel_create(self, name, datadir, stormsdir, params):
+    def _mpi_get_data(self, name, datadir, stormsdir, params):
         """Create a dataset in parallel"""
 
         comm = MPI.COMM_WORLD
@@ -358,21 +363,47 @@ class Dataset:
         return dirs
 
     def _get_data(self, dirs, params, inds=None):
-        """Aggregate feature data for a set of storms, possible indexed by inds"""
+        """
+        Aggregate feature data for a set of storms, possibly indexed by inds.
+
+        Parameters:
+        -----------
+        dirs : List[str]
+            A list of directories containing storm data.
+        params : Dict[str, Union[str, int, float]]
+            A dictionary of parameters to pass to _extract_storm_data() function.
+        inds : Optional[List[int]], default None
+            A list of indices to loop over from the given directories. Default is None, which loops over all directories.
+
+        Returns:
+        --------
+        Dict[str, Union[np.ndarray, List[Union[str, int, float]]]]
+            A dictionary containing feature data for a set of storms.
+        """
 
         arrs = defaultdict(list)
         if inds is None:
             inds = range(len(dirs))
-        for i in inds:
-            info = self._extract_storm_data(dirs[i], **params)
-            print(f"Processing storm {i}")
-            if info is None:
-                print(f"Storm {i} missing data.")
-                continue
-            info["storm"] = np.full(len(info["inds"]), i, dtype=int)
-            for k, v in info.items():
-                arrs[k].append(v)
-            gc.collect()
+        with alive_bar(
+            len(inds),
+            length=10,
+            title=f"Processing {len(inds)} storms...",
+            bar="circles",
+            dual_line=True,
+            force_tty=True,
+            monitor=True,
+        ) as bar:
+            for i in inds:
+                bar.text = f"-> Extracting data for storm {i}"
+                info = self._extract_storm_data(dirs[i], **params)
+                if info is None:
+                    print(f"Storm {i} missing data.")
+                    continue
+                info["storm"] = np.full(len(info["inds"]), i, dtype=int)
+                for k, v in info.items():
+                    arrs[k].append(v)
+                gc.collect()
+                bar()
 
         local_data = {}
         for k, v in arrs.items():
@@ -386,19 +417,21 @@ class Dataset:
         gc.collect()
         return local_data
 
-    def create(self,
-               name,
-               datadir="data",
-               stormsdir="storms",
-               hours_before=6,
-               hours_after=6,
-               cutoff_coastal_dist=30,
-               max_depth=2,
-               min_depth=-4,
-               r=150,
-               downsample_factor=100,
-               bounds=(24, 32, -98, -88),
-               ):
+    def create(
+        self,
+        name,
+        datadir="data",
+        stormsdir="storms",
+        parallel=False,
+        hours_before=6,
+        hours_after=6,
+        cutoff_coastal_dist=30,
+        max_depth=2,
+        min_depth=-4,
+        r=150,
+        downsample_factor=100,
+        bounds=(24, 32, -98, -88),
+    ):
         """
         Create
 
@@ -417,6 +450,9 @@ class Dataset:
         stormsdir : str, optional
             The name of the directory that contains the storm data.
             Default is "storms".
+        parallel: bool, optional
+            Whether to run in parallel using MPI (if available).
+            Default is False.
         **kwargs
             Additional keyword arguments for configuring the dataset creation
             process.
@@ -445,14 +481,18 @@ class Dataset:
             "bounds": bounds,
         }
 
-        if have_mpi:
-            self._parallel_create(name, datadir, stormsdir, params)
+        if have_mpi and parallel:
+            self._mpi_get_data(name, datadir, stormsdir, params)
             return
 
+        print("Getting storm directories...")
         dirs = self._get_storm_dirs(datadir, stormsdir)
+        print("Getting mesh variables...")
         self.mesh_vars = self._get_mesh_vars(datadir)
+        print("Computing storm features...")
         data = self._get_data(dirs, params)
 
+        print("Saving Dataset...")
         self._save_dataset(name, datadir, data, dirs, params)
 
     def setup(

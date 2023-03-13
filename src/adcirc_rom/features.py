@@ -1,12 +1,150 @@
 import os
+from collections import defaultdict
+from pathlib import Path
 
 import geopandas as gpd
 import h5py
 import netCDF4 as nc
 import numpy as np
+import xgboost as xgb
 from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
 
-earth_radius = 6731
+from adcirc_rom.constants import earth_radius
+
+
+class FeatureImportance(xgb.callback.TrainingCallback):
+    """Monitors the feature importances during cross-validation."""
+
+    def __init__(self, sample_rounds=50):
+        """sample_rouds defines how often we sample the feature importances"""
+
+        self.feature_importances = defaultdict(list)
+        self.sample_rounds = sample_rounds
+
+    def after_iteration(self, model, epoch, evals_log):
+        if epoch % self.sample_rounds:
+            return
+        bst = model.cvfolds[0].bst
+        self.add_importances(bst)
+
+    def add_importances(self, bst):
+        importances = bst.get_score(importance_type="gain")
+        for k, v in importances.items():
+            self.feature_importances[k].append(v)
+
+    def print_summary(self, top=10):
+        feat_names = []
+        avg_importances = []
+        for k, v in self.feature_importances.items():
+            feat_names.append(k)
+            avg_importances.append(np.mean(np.array(v)))
+        avg_importances = np.array(avg_importances)
+        order = np.argsort(avg_importances)
+        print(f"Top {top} Features")
+        for i, ind in enumerate(order[-1 : -top - 1 : -1]):
+            print(f"#{i+1}: {feat_names[ind]} with gain {avg_importances[ind]:.2f}")
+
+
+def extract_features(ds, include_latlon=False, exclude_bathy=False):
+    """
+    Extracts features from an xarray dataset based on certain criteria.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The input dataset.
+    include_latlon : bool, optional
+        Whether to include variables with names "x" and "y", by default False.
+    exclude_bathy : bool, optional
+        Whether to exclude variables that start with "bathy", by default False.
+
+    Returns
+    -------
+    Tuple[np.ndarray, List[str]]
+        A tuple containing a NumPy array of the extracted features (with dimensions
+        `(number of samples, number of features)`) and a list of their names.
+    """
+    arrs = []
+    names = []
+
+    # add scalar properties
+    for var in sorted(list(ds.keys())):
+        # if var.count("_") >= 3: continue
+        if (
+            (not exclude_bathy and var.startswith("bathy"))
+            or var in ["coastal_dist", "landfall_dist", "depth"]
+            or (include_latlon and var in ["x", "y"])
+            or var.startswith("amplitude")
+            or any([k in var for k in ["wind", "pressure", "magnitude", "iceaf"]])
+        ):
+            names.append(var)
+
+    n = ds[names[0]].shape[0]
+    mat = np.zeros((len(names), n))
+    for i, name in enumerate(names):
+        mat[i] = ds[name][:]
+
+    return mat.T, names
+
+
+class CorrelationFilter:
+    """A class to eliminate correlated features"""
+
+    def __init__(self, threshold):
+        """Initialize the filter"""
+
+        self.threshold = threshold
+
+    def fit(self, X, y=None):
+        """Determine the features to remove"""
+
+        corrs = np.corrcoef(X, rowvar=False)
+        n = corrs.shape[0]
+        keep = np.ones(n, dtype=bool)
+
+        for i in range(n):
+            if not keep[i]:
+                continue
+            for j in range(i + 1, n):
+                if not keep[j]:
+                    continue
+                if abs(corrs[i, j]) > self.threshold:
+                    keep[j] = 0
+
+        self.cols_to_keep = np.where(keep)[0]
+
+    def transform(self, X):
+        return X[:, self.cols_to_keep]
+
+    def fit_transform(self, X, y=None):
+        self.fit(X, y)
+        return self.transform(X)
+
+
+class FeatureImportanceFilter:
+    """Determine feature importances by training a regressor on a subsample of the data"""
+
+    def __init__(self, max_features=50):
+        """Initialize the transform and set the max number of features to keep"""
+
+        self.max_features = max_features
+
+    def fit(self, X, y):
+        model = xgb.XGBRegressor(
+            n_estimators=10, importance_type="gain", n_jobs=32, subsample=0.5
+        )
+        model.fit(X, y)
+        importances = model.feature_importances_
+        # select the top features based on importance
+        inds = np.argsort(importances)
+        self.cols_to_keep = inds[-self.max_features :]
+
+    def transform(self, X):
+        return X[:, self.cols_to_keep]
+
+    def fit_transform(self, X, y):
+        self.fit(X, y)
+        return self.transform(X)
 
 
 def save_stats(stats, outfile):
@@ -118,7 +256,7 @@ def init_shared_features(
         save_stats(stats, output_dir + "/bathy_stats.hdf5")
         x, y = ds["x"][:], ds["y"][:]
 
-        shoreline = gpd.read_file(coastfile)
+        shoreline = gpd.read_file(str(Path(__file__).parent / coastfile))
 
         lats = []
         lons = []

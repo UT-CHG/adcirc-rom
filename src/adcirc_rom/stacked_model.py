@@ -1,23 +1,27 @@
 import gc
 import json
 import os
+import pdb
 
 import h5py
 import joblib
 import numpy as np
-import tensorflow as tf
 import xgboost as xgb
 from fire import Fire
-from keras.callbacks import CSVLogger, ModelCheckpoint
-from model import CorrelationFilter, FeatureImportanceFilter, extract_features
 from sklearn.decomposition import PCA
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tensorflow import keras
-from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import ReduceLROnPlateau
+from tensorflow.keras.callbacks import (CSVLogger, ModelCheckpoint,
+                                        ReduceLROnPlateau)
+from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.optimzers import Adam
+
+from adcirc_rom.constants import SUPPORTED_MODELS
+from adcirc_rom.model import (CorrelationFilter, FeatureImportanceFilter,
+                              extract_features)
 
 
 class StackedModel:
@@ -27,14 +31,8 @@ class StackedModel:
     is split into classification and regression steps.
     """
 
-    supported_models = {
-        "nn1": {"size": 1},
-        "nn2": {"size": 2},
-        "nn3": {"size": 3},
-        "xgb250": {"n_estimators": 250, "n_jobs": 32, "early_stopping_rounds": 10},
-        "xgb30": {"n_estimators": 30, "n_jobs": 32, "early_stopping_rounds": 10},
-        "dummy": {},
-    }
+    def _get_modeldir(self, modelname):
+        return f"{self._datadir}/models/{modelname}"
 
     def __init__(
         self,
@@ -67,6 +65,26 @@ class StackedModel:
         print("Loaded data")
 
     def _split_data(self, split_factor=10, seed=2022):
+        """
+        Split the data into training and testing sets.
+
+        Parameters
+        ----------
+        split_factor : int, optional
+            Number of splits for cross-validation, by default 10.
+        seed : int, optional
+            Seed for random number generator, by default 2022.
+
+        Returns
+        -------
+        None
+            The function sets the following attributes: `x_train`, `y_train`,
+            `x_test`,  `y_test`, and `holdout_inds`.
+
+        Note
+        ----
+        If function has been called before, split is not re-computed.
+        """
         if hasattr(self, "x_train"):
             return
         np.random.seed(seed)
@@ -99,11 +117,6 @@ class StackedModel:
             self.holdout_inds = holdout_inds
             break
 
-        print("Split data.")
-
-    def _get_modeldir(self, modelname):
-        return f"{self._datadir}/models/{modelname}"
-
     def train(
         self,
         classifier="nn1",
@@ -114,11 +127,37 @@ class StackedModel:
         pca_components=50,
         correlation_threshold=0.9,
     ):
-        """Train the stacked model"""
+        """
+        Trains the stacked model.
 
-        if classifier not in self.supported_models:
+        Parameters
+        ----------
+        classifier : str, optional
+            Classifier model name, by default "nn1".
+        regressor : str, optional
+            Regressor model name, by default "nn1".
+        epochs : int, optional
+            Number of epochs, by default 100.
+        preprocess : str or None, optional
+            Preprocessing method, by default None.
+        modelname : str or None, optional
+            Name for the trained model, by default will resolve to:
+            `stacked_{classifier}_{regressor}_{self._dataset}`
+        pca_components : int, optional
+            Number of PCA components to keep, by default 50.
+        correlation_threshold : float, optional
+            Correlation threshold for feature selection, by default 0.9.
+
+        Returns
+        -------
+        res : dict
+            Dictionary with results of training the model, including the
+            classification accuracy, the mean error in regression, and the
+            root mean squared error.
+        """
+        if classifier not in SUPPORTED_MODELS:
             raise ValueError(f"Unsupported classifier {classifier}!")
-        if regressor not in self.supported_models:
+        if regressor not in SUPPORTED_MODELS:
             raise ValueError(f"Unsupported regressor {regressor}!")
 
         if modelname is None:
@@ -171,7 +210,7 @@ class StackedModel:
             )
             cp = ModelCheckpoint(modeldir + "/classifier", save_best_only=True)
             callbacks = [
-                keras.callbacks.ReduceLROnPlateau(
+                ReduceLROnPlateau(
                     monitor="val_loss",
                     factor=0.2,
                     patience=2,
@@ -181,7 +220,7 @@ class StackedModel:
                 csv_logger,
                 cp,
             ]
-            optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+            optimizer = Adam(learning_rate=0.0001)
             clf.compile(
                 loss="binary_crossentropy", optimizer=optimizer, metrics=["accuracy"]
             )
@@ -218,6 +257,8 @@ class StackedModel:
 
         acc = (test_stage1_pred.astype(int) == y_test_class).mean()
         print(f"Classification accuracy on test data {100*acc:.2f}%")
+
+        pdb.set_trace()
         # train the regression model on non-zero values
         if classifier == "dummy":
             y_filter_index = np.ones(len(y_train)).astype(bool)
@@ -229,8 +270,8 @@ class StackedModel:
 
         print("Training regressor")
         if regressor.startswith("nn"):
-            loss = tf.keras.losses.MeanSquaredError(reduction="auto")
-            optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+            loss = MeanSquaredError(reduction="auto")
+            optimizer = Adam(learning_rate=0.0001)
             reduce_lr = ReduceLROnPlateau(
                 monitor="val_loss", factor=0.2, patience=5, min_lr=0.00001
             )
@@ -294,7 +335,7 @@ class StackedModel:
         return res
 
     def _get_model(self, name, num_features, classifier=True):
-        params = self.supported_models[name]
+        params = SUPPORTED_MODELS[name]
         params["classifier"] = classifier
         if name.startswith("nn"):
             return self._get_nn(num_features=num_features, **params)
@@ -304,20 +345,20 @@ class StackedModel:
     def _get_nn(self, num_features, size=1, classifier=True):
         inputs = keras.Input(shape=num_features)
         initial_width = width = 256
-        x = layers.Dense(initial_width, activation="relu")(inputs)
+        x = keras.layers.Dense(initial_width, activation="relu")(inputs)
 
         for i in range(size):
             width *= 2
-            x = layers.Dense(width, activation="relu")(x)
+            x = keras.layers.Dense(width, activation="relu")(x)
 
         for i in range(size):
             width = width // 2
-            x = layers.Dense(width, activation="relu")(x)
+            x = keras.layers.Dense(width, activation="relu")(x)
 
         if classifier:
-            x = layers.Dense(1, activation="sigmoid")(x)
+            x = keras.layers.Dense(1, activation="sigmoid")(x)
         else:
-            x = layers.Dense(1, activation="relu")(x)
+            x = keras.layers.Dense(1, activation="relu")(x)
 
         return keras.Model(inputs, x)
 
@@ -328,11 +369,26 @@ class StackedModel:
             return xgb.XGBRegressor(eval_metric="mae", **kwargs)
 
     def predict(self, modelname, test_only=False):
-        """Generate predictions for the given dataset
+        """
+        Generate predictions for the given dataset
 
-        If test_only is True, assume this is the original dataset the model was trained with
-        and regenerate predictions for the test set. Otherwise, generated named predictions
-        for the entire datset.
+        If test_only is True, assume this is the original dataset the model was
+        trained with and regenerate predictions for the test set. Otherwise,
+        generated named predictions for the entire datset.
+
+        Parameters
+        ----------
+        modelname : str
+            Name of the trained model to use for prediction.
+        test_only : bool, optional
+            Whether to generate predictions for the test set only, by default
+        False.
+
+        Returns
+        -------
+        outname: str
+            Name of output file named 'test_pred5.hdf5' if test_only is set,
+            or '{self._dataset}._preds.hdf5' if it is not.
         """
 
         # load model
@@ -391,6 +447,8 @@ class StackedModel:
             outds["coords"] = coords
             outds["storm_inds"] = storm_inds
             outds["maxele"] = y
+
+        return outname
 
 
 if __name__ == "__main__":
