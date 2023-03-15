@@ -8,7 +8,6 @@ import os
 import click
 
 from adcirc_rom.constants import SUPPORTED_MODELS
-from adcirc_rom.dataset import Dataset
 
 
 @click.group()
@@ -51,6 +50,8 @@ def setup(datadir, projectdir):
                 with a dataset of 446 synthetic ADCIRC simulations).
       - models: Directory containing saved ML models and predictions.
     """
+    from adcirc_rom.dataset import Dataset
+
     ds = Dataset()
     ds.setup(datadir=datadir, projectdir=projectdir)
 
@@ -154,6 +155,8 @@ def create(
     supports parallization with MPI - and is significantly faster when run on
     HPC resources such as TACC.
     """
+    from adcirc_rom.dataset import Dataset
+
     ds = Dataset()
     ds.create(
         name=name,
