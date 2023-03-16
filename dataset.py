@@ -16,6 +16,7 @@ except ImportError:
 from collections import defaultdict
 from features import GridEncoder, init_shared_features
 import gc
+import json
 
 """
 Create the ML dataset in parallel.
@@ -284,7 +285,7 @@ class Dataset:
     def _get_storm_dirs(self, datadir, stormsdir):
         dirs = []
         dirname = datadir+"/"+stormsdir
-        for d in os.listdir(dirname):
+        for d in sorted(os.listdir(dirname)):
             d = dirname+"/"+d
             if os.path.isdir(d) and "." not in d:
                 # ensemble outputs subdirectory
@@ -330,6 +331,9 @@ class Dataset:
 
         params = default_kwargs.copy()
         params.update(kwargs)
+        if "bounds" not in kwargs and os.path.exists(datadir+"/bounds.json"):
+            with open(datadir+"/bounds.json") as fp:
+                params["bounds"] = json.load(fp)
 
         if have_mpi:
             self._parallel_create(name, datadir, stormsdir, params)
