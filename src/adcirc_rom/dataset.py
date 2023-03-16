@@ -352,7 +352,7 @@ class Dataset:
     def _get_storm_dirs(self, datadir, stormsdir):
         dirs = []
         dirname = datadir + "/" + stormsdir
-        for d in os.listdir(dirname):
+        for d in sorted(os.listdir(dirname)):
             d = dirname + "/" + d
             if os.path.isdir(d) and "." not in d:
                 # ensemble outputs subdirectory
