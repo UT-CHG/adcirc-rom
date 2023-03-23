@@ -17,11 +17,11 @@ from tensorflow import keras
 from tensorflow.keras.callbacks import (CSVLogger, ModelCheckpoint,
                                         ReduceLROnPlateau)
 from tensorflow.keras.losses import MeanSquaredError
-from tensorflow.keras.optimzers import Adam
+from tensorflow.keras.optimizers import Adam
 
 from adcirc_rom.constants import SUPPORTED_MODELS
-from adcirc_rom.model import (CorrelationFilter, FeatureImportanceFilter,
-                              extract_features)
+from adcirc_rom.features import (CorrelationFilter, FeatureImportanceFilter)
+from adcirc_rom.model import extract_features
 
 
 class StackedModel:
