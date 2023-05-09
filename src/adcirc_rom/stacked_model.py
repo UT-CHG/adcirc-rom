@@ -1,7 +1,7 @@
 import gc
 import json
 import os
-import pdb
+#import pdb
 
 import h5py
 import joblib
@@ -258,7 +258,7 @@ class StackedModel:
         acc = (test_stage1_pred.astype(int) == y_test_class).mean()
         print(f"Classification accuracy on test data {100*acc:.2f}%")
 
-        pdb.set_trace()
+        #pdb.set_trace()
         # train the regression model on non-zero values
         if classifier == "dummy":
             y_filter_index = np.ones(len(y_train)).astype(bool)
