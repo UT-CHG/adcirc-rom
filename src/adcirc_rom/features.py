@@ -45,7 +45,7 @@ class FeatureImportance(xgb.callback.TrainingCallback):
             print(f"#{i+1}: {feat_names[ind]} with gain {avg_importances[ind]:.2f}")
 
 
-def extract_features(ds, include_latlon=False, exclude_bathy=False):
+def extract_features(ds, include_latlon=False, exclude_bathy=False, names_only=False):
     """
     Extracts features from an xarray dataset based on certain criteria.
 
@@ -57,6 +57,8 @@ def extract_features(ds, include_latlon=False, exclude_bathy=False):
         Whether to include variables with names "x" and "y", by default False.
     exclude_bathy : bool, optional
         Whether to exclude variables that start with "bathy", by default False.
+    names_only : bool, optional
+        If True, return only the feature names
 
     Returns
     -------
@@ -78,6 +80,8 @@ def extract_features(ds, include_latlon=False, exclude_bathy=False):
             or any([k in var for k in ["wind", "pressure", "magnitude", "iceaf"]])
         ):
             names.append(var)
+
+    if names_only: return names
 
     n = ds[names[0]].shape[0]
     mat = np.zeros((len(names), n))
