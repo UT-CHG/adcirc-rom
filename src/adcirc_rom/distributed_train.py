@@ -44,6 +44,12 @@ def main(args):
     args.distributed = args.world_size > 1
     ngpus_per_node = torch.cuda.device_count()
 
+    os.environ['MASTER_PORT'] = "55667"
+    nodelist = os.environ['SLURM_JOB_NODELIST']
+    master_addr = nodelist.strip().split()[0]
+    print("Setting master_addr to ", master_addr, "on rank", comm.rank)
+    os.environ['MASTER_ADDR'] = master_addr
+
     if args.distributed:
         args.rank = comm.rank
         args.gpu = args.rank % ngpus_per_node
