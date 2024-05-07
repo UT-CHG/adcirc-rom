@@ -1,4 +1,5 @@
 import os
+import sys
 import builtins
 import argparse
 import torch
@@ -22,7 +23,7 @@ def parse_args():
                         help='start epoch number (useful on restarts)')
     parser.add_argument('--epochs', default=10, type=int, help='number of total epochs to run')
     parser.add_argument('--datadir', default="/scratch/06307/clos21/shared/prateek/NA")
-    parser.add_argument('--workers', default=1, help="Num workers for dataloader")
+    parser.add_argument('--workers', default=1, type=int, help="Num workers for dataloader")
     # DDP configs:
     parser.add_argument('--world-size', default=-1, type=int, 
                         help='number of nodes for distributed training')
@@ -129,12 +130,15 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
     # input_data = input_data.cuda() as normal
     epoch_loss = 0.0
     for target, features in train_loader:
+        target = target.unsqueeze(1)
         model.zero_grad()
         preds = model(features.cuda())
         err = criterion(preds, target.cuda())
-        err.backwards()
+        err.backward()
         optimizer.step()
         epoch_loss += float(err)
+        print(err)
+        sys.stdout.flush()
 
     print(f"Epoch loss for {epoch}: {epoch_loss}")
 
