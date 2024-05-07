@@ -23,7 +23,7 @@ class FeedForwardNet(nn.Module):
               layers.append(nn.LeakyReLU())
         
         # use relu for output activation
-        layers.append(nn.ReLU)
+        layers.append(nn.ReLU())
         self._model = nn.Sequential(*layers)
 
     def forward(self, x):

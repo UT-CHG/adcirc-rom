@@ -5,7 +5,9 @@ import torch
 import numpy as np 
 import random
 import torch.distributed as dist
+from mpi4py import MPI
 from torch import nn, optim
+from torch.utils import data
 
 from adcirc_rom.torch_models import FeedForwardNet
 from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn
@@ -20,6 +22,7 @@ def parse_args():
                         help='start epoch number (useful on restarts)')
     parser.add_argument('--epochs', default=10, type=int, help='number of total epochs to run')
     parser.add_argument('--datadir', default="/scratch/06307/clos21/shared/prateek/NA")
+    parser.add_argument('--workers', default=1, help="Num workers for dataloader")
     # DDP configs:
     parser.add_argument('--world-size', default=-1, type=int, 
                         help='number of nodes for distributed training')
@@ -36,18 +39,14 @@ def parse_args():
                                          
 def main(args):
     # DDP setting
-    if "WORLD_SIZE" in os.environ:
-        args.world_size = int(os.environ["WORLD_SIZE"])
+    comm = MPI.COMM_WORLD
+    args.world_size = comm.size
     args.distributed = args.world_size > 1
     ngpus_per_node = torch.cuda.device_count()
 
     if args.distributed:
-        if args.local_rank != -1: # for torch.distributed.launch
-            args.rank = args.local_rank
-            args.gpu = args.local_rank
-        elif 'SLURM_PROCID' in os.environ: # for slurm scheduler
-            args.rank = int(os.environ['SLURM_PROCID'])
-            args.gpu = args.rank % torch.cuda.device_count()
+        args.rank = comm.rank
+        args.gpu = args.rank % ngpus_per_node
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
 
@@ -58,7 +57,7 @@ def main(args):
         builtins.print = print_pass
        
     ### model ###
-    model = FeedForwardNet()
+    model = FeedForwardNet(156)
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
@@ -79,19 +78,19 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     
     ### resume training if necessary ###
-    if args.resume:
-        pass
+    #if args.resume:
+    #    pass
     
     ### data ###
-    train_dataset = SyntheticTCDataset()
-    train_sampler = data.distributed.DistributedSampler(dataset, shuffle=True)
+    train_dataset = SyntheticTCDataset(args.datadir)
+    train_sampler = data.distributed.DistributedSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
             num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True,
             collate_fn=tc_collate_fn
             )
     
-    val_dataset = SyntheticTCDataset(val=True)
+    val_dataset = SyntheticTCDataset(args.datadir, val=True)
     val_sampler = None
     val_loader = torch.utils.data.DataLoader(
             val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
@@ -149,3 +148,4 @@ def validate(val_loader, model, criterion, epoch, args):
 
 if __name__ == '__main__':
     args = parse_args()
+    main(args)
