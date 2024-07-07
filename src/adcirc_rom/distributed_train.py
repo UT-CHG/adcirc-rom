@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('--gpu', default=None, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, help='start epoch number (useful on restarts)')
     parser.add_argument('--epochs', default=10, type=int, help='number of total epochs to run')
-    parser.add_argument('--datadir', default="/scratch1/06307/clos21/shared/prateek-updated/NA")
+    parser.add_argument('--datadir', default="/scratch1/09631/maxzhao88/small-data/NA")
     parser.add_argument('--workers', default=8, type=int, help="Num workers for dataloader")
     parser.add_argument('--save_dir', default='./trained_model', type=str, help='directory to save checkpoints and final model')
     parser.add_argument('--test', action='store_true', help='run test dataset evaluation')
@@ -116,11 +116,11 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         np.random.seed(epoch)
         random.seed(epoch)
-        # fix sampling seed such that each gpu gets different part of dataset
-        if args.distributed:
+        if args.distributed and isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
-            if val_loader.sampler is not None:
-                val_loader.sampler.set_epoch(epoch)
+        if args.distributed and isinstance(val_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+            val_loader.sampler.set_epoch(epoch)
+
 
         epoch_start_time = time.time()
         train_loss = train_one_epoch(train_loader, model, criterion, optimizer, epoch, args)
