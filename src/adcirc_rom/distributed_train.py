@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('--gpu', default=None, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, help='start epoch number (useful on restarts)')
     parser.add_argument('--epochs', default=10, type=int, help='number of total epochs to run')
-    parser.add_argument('--datadir', default="/scratch1/09631/maxzhao88/small-data/NA")
+    parser.add_argument('--datadir', default="/scratch1/06307/clos21/shared/prateek-updated/NA")
     parser.add_argument('--workers', default=8, type=int, help="Num workers for dataloader")
     parser.add_argument('--save_dir', default='./trained_model', type=str, help='directory to save checkpoints and final model')
     parser.add_argument('--test', action='store_true', help='run test dataset evaluation')
