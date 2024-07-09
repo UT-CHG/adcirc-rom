@@ -9,8 +9,8 @@ import torch.distributed as dist
 from mpi4py import MPI
 from torch import nn, optim
 from torch.utils import data
-from torch_models import FeedForwardNet
-from torch_datasets import SyntheticTCDataset, tc_collate_fn
+from adcirc_rom.torch_models import FeedForwardNet
+from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import time
