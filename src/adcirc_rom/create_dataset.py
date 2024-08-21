@@ -141,7 +141,7 @@ class Dataset:
 
         rmax_lanfall = trk[(trk['lat']==lat_fall)&((trk['lon']==lon_fall))].rmax.values
         gdf_points['bathy'] = bathy_fil
-        select_nodes = self._sample_data(gdf_points, lat_fall, lon_fall, rmax_lanfall, downsample_factor=10)
+        select_nodes = self._sample_data(gdf_points, lat_fall, lon_fall, rmax_lanfall, downsample_factor=20)
 
         max_surge_point = gdf_points[gdf_points['zeta_max']==gdf_points['zeta_max'].max()]
         # Check if the file exists
@@ -173,7 +173,7 @@ class Dataset:
 
         if file_exists:
             # If the file exists, open it
-            df = pd.read_csv(file_name)
+            df = pd.read_csv(file_name, na_values=[], keep_default_na=False)
             # Concatenate the new DataFrame with the existing one
             df = pd.concat([df, df1], axis=0)
 
@@ -215,57 +215,67 @@ class Dataset:
     def _sample_data(self, gdf_points, center_lat, center_lon, rmax, downsample_factor):
     
         # Window for filtering
-        window = np.ceil(2 * rmax / 111)[0]
+        # window = np.ceil(2 * rmax / 111)[0]
+        window = float(5)
         points_in_square = self._windowing(gdf_points, center_lat, center_lon, window)
         
-        while len(points_in_square) < 1000:
+        if len(points_in_square) < 1000:
             window *= 2
             points_in_square = self._windowing(gdf_points, center_lat, center_lon, window)
+        
         
         if len(points_in_square) // downsample_factor >= 1000:
             n_samples = int(len(points_in_square) / downsample_factor)
 
-            # Normalize zeta_max to [0, 1]
-            zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
+            # # Normalize zeta_max to [0, 1]
+            # zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
 
-            # Create a Sobol sequence generator for 1-dimensional sampling
-            sobol_sampler = qmc.Sobol(d=1)
+            # # Create a Sobol sequence generator for 1-dimensional sampling
+            # sobol_sampler = qmc.Sobol(d=1)
 
-            # Generate quasi-random samples in the range [0, 1)
-            samples = sobol_sampler.random(n=n_samples)
+            # # Generate quasi-random samples in the range [0, 1)
+            # samples = sobol_sampler.random(n=n_samples)
 
-            # Scale the Sobol sequence to match the range of zeta_max
-            scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
+            # # Scale the Sobol sequence to match the range of zeta_max
+            # scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
 
-            # Map Sobol sequence to zeta_max values
-            sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
+            # # Map Sobol sequence to zeta_max values
+            # sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
 
-            # Select the rows based on the mapped indices
-            sampled_indices = points_in_square.index[sampled_zeta_indices]
-            points_in_square = points_in_square.loc[sampled_indices]
+            # # Select the rows based on the mapped indices
+            # sampled_indices = points_in_square.index[sampled_zeta_indices]
+            # points_in_square = points_in_square.loc[sampled_indices]
 
+            rand_nodes = np.random.permutation(len(points_in_square))
+
+
+            points_in_square = points_in_square.iloc[rand_nodes[:int(n_samples)]]
         
         elif len(points_in_square) > 1000:
             n_samples = 1000
             
-            # Normalize zeta_max to [0, 1]
-            zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
+            # # Normalize zeta_max to [0, 1]
+            # zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
 
-            # Create a Sobol sequence generator for 1-dimensional sampling
-            sobol_sampler = qmc.Sobol(d=1)
+            # # Create a Sobol sequence generator for 1-dimensional sampling
+            # sobol_sampler = qmc.Sobol(d=1)
 
-            # Generate quasi-random samples in the range [0, 1)
-            samples = sobol_sampler.random(n=n_samples)
+            # # Generate quasi-random samples in the range [0, 1)
+            # samples = sobol_sampler.random(n=n_samples)
 
-            # Scale the Sobol sequence to match the range of zeta_max
-            scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
+            # # Scale the Sobol sequence to match the range of zeta_max
+            # scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
 
-            # Map Sobol sequence to zeta_max values
-            sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
+            # # Map Sobol sequence to zeta_max values
+            # sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
 
-            # Select the rows based on the mapped indices
-            sampled_indices = points_in_square.index[sampled_zeta_indices]
-            points_in_square = points_in_square.loc[sampled_indices]
+            # # Select the rows based on the mapped indices
+            # sampled_indices = points_in_square.index[sampled_zeta_indices]
+            # points_in_square = points_in_square.loc[sampled_indices]
+            rand_nodes = np.random.permutation(len(points_in_square))
+
+
+            points_in_square = points_in_square.iloc[rand_nodes[:int(n_samples)]]
         
         return points_in_square
     
