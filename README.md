@@ -8,10 +8,8 @@ The tools can be used both in an HPC and a single-threaded environment.
 
 2. Use Jupyter lab to launch a terminal, and in the terminal run the following:
 ```
-pip install netCDF4 sklearn global-land-mask xgboost geopandas scipy h5py fire
-git clone https://github.com/UT-CHG/adcirc-rom.git
-cd adcirc-rom
-python3 dataset.py setup
+pip install adcirc-rom
+arom dataset setup
 ```
 
 This will create a `data` folder with the subdirectories `datasets`, `storms` and `models`.
@@ -22,7 +20,7 @@ Finally, the `models` dataset is used for storing saved ML models and prediction
 
 3. To generate a dataset, run the command 
 ```
-python3 dataset.py create default
+arom dataset create default
 ```
 
 This will create a dataset named 'default' in the directory `data/datasets`.
@@ -36,27 +34,18 @@ size of the data to be processed. The dataset generation script supports paralli
 faster when run on HPC resources such as TACC.
  
 
-4. To train and save a new model named 'xgb_base', using the dataset named default, run the command
+4. To train and save a new model named 'xgb_base' using XGBoost for both classification and regression, and using the dataset named default, run the command
 ```
-python3 model.py train xgb_base --dataset=default
+arom model train --modelname=xgb_base --dataset=default --regressor=xgb250 --classifier=xgb250
 ```
 
 This will create a new model named 'xgb_base'. During, training, a portion of the dataset is set aside
 for testing purposes - predictions are generated for the test dataset and saved alongside the model binary.
 Additional model training parameters can be passed to the script.
 
-To perform cross-validation, run the command
-
-```
-python3 model.py cv --dataset=default
-```
-
-This will also print out feature importances. Note that all model training parameters that are supported by the
-`train` are supported by the `cv` command as well. This allows for testing out of parameters before training a model.
-
 Finally, to generate predictions on a new dataset using a saved model, run
 ```
-python3 model.py predict [modelname] --dataset=[datasetname]
+arom model predict [modelname] --dataset=[datasetname]
 ```
 
 All predictions can be accessed in the folder `data/datasets/[modelname]`.
