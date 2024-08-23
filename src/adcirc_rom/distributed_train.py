@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import builtins
 import argparse
@@ -49,15 +50,15 @@ def main(args):
 
     os.environ['MASTER_PORT'] = "55667"
     nodelist = os.environ['SLURM_JOB_NODELIST']
-    master_addr = nodelist.strip().split()[0]
+    master_addr = subprocess.check_output(f'scontrol show hostnames "{nodelist}" | head -n 1', shell=True)
+    master_addr = master_addr.decode().strip()
     print("Setting master_addr to ", master_addr, "on rank", comm.rank)
     os.environ['MASTER_ADDR'] = master_addr
 
     if args.distributed:
         args.rank = comm.rank
         args.gpu = args.rank % ngpus_per_node
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
+        dist.init_process_group("nccl", world_size=args.world_size, rank=args.rank)
 
     # suppress printing if not on master gpu
     if args.rank != 0:
