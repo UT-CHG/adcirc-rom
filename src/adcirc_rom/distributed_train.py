@@ -7,7 +7,12 @@ import torch
 import numpy as np
 import random
 import torch.distributed as dist
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+    have_mpi4py = True
+except:
+    have_mpi4py = False
+
 from torch import nn, optim
 from torch.utils import data
 from adcirc_rom.torch_models import FeedForwardNet
@@ -43,8 +48,15 @@ def main(args):
     print(f"args.test = {args.test}")
 
     # DDP setting
-    comm = MPI.COMM_WORLD
-    args.world_size = comm.size
+    if have_mpi4py:
+        comm = MPI.COMM_WORLD
+        rank = comm.rank
+        size = comm.size
+    else:
+        rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
+        size = int(os.environ["SLURM_NTASKS"])
+
+    args.world_size = size
     args.distributed = args.world_size > 1
     ngpus_per_node = torch.cuda.device_count()
 
@@ -52,11 +64,11 @@ def main(args):
     nodelist = os.environ['SLURM_JOB_NODELIST']
     master_addr = subprocess.check_output(f'scontrol show hostnames "{nodelist}" | head -n 1', shell=True)
     master_addr = master_addr.decode().strip()
-    print("Setting master_addr to ", master_addr, "on rank", comm.rank)
+    print("Setting master_addr to ", master_addr, "on rank", rank)
     os.environ['MASTER_ADDR'] = master_addr
 
     if args.distributed:
-        args.rank = comm.rank
+        args.rank = rank
         args.gpu = args.rank % ngpus_per_node
         dist.init_process_group("nccl", world_size=args.world_size, rank=args.rank)
 
@@ -70,7 +82,7 @@ def main(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
     ### model ###
-    model = FeedForwardNet(156)
+    model = FeedForwardNet(160)
     
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -111,7 +123,8 @@ def main(args):
     criterion = nn.MSELoss()
 
     # log file
-    log_file = open(os.path.join(args.save_dir, 'training_log.txt'), 'w')
+    if args.rank == 0:
+        log_file = open(os.path.join(args.save_dir, 'training_log.txt'), 'w')
 
     # Training and validation loop
     for epoch in range(args.start_epoch, args.epochs):
@@ -141,10 +154,12 @@ def main(args):
         print("Running test evaluation")
         test_loss = test(test_loader, model, criterion, args)
         print(f'Test Loss: {test_loss}')
-        log_file.write(f"Test Loss: {test_loss}\n")
+        if args.rank == 0:
+            log_file.write(f"Test Loss: {test_loss}\n")
     else:
         print("Test flag not set, skipping test evaluation")
-    log_file.close()
+    if args.rank == 0:
+        log_file.close()
     end_time = time.time()
     training_duration = (end_time - start_time) / 60 
     print(f"Training completed in {training_duration:.2f} minutes")
