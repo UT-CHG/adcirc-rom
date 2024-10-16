@@ -148,6 +148,7 @@ class GridEncoder:
                 self.x.min(),
                 self.x.max(),
             )
+            print("Encoder Bounds", min_lat, max_lat, min_lon, max_lon)
         else:
             min_lat, max_lat, min_lon, max_lon = bounds
 
@@ -164,10 +165,9 @@ class GridEncoder:
         self.flat_inds = self.x_inds * ny + self.y_inds
 
         self.counts = np.bincount(self.flat_inds, minlength=nx * ny).reshape((nx, ny))
-
-        # self.counts = np.histogram2d(self.x, self.y, bins=[self.x_bins, self.y_bins])[0]
         # avoid divide by zero
-        self.counts[self.counts == 0] = 1
+        self.empty = self.counts == 0
+        self.counts[self.empty] = 1
 
     def encode(self, var, scales=[1], outx=None, outy=None, name=None):
         """Divide the mesh into cells and determine the min, max, and mean bathymetry within each cell
@@ -192,7 +192,11 @@ class GridEncoder:
         outx_inds[outx_inds >= nx] = nx - 1
         outy_inds[outy_inds >= ny] = ny - 1
         res = {}
-
+        # properly handle empty grid cells for min/max filters
+        max_input = means.copy()
+        max_input[self.empty] = -np.inf
+        min_input = means.copy()
+        min_input[self.empty] = np.inf
         if name is not None:
             pref = name + "_"
         else:
@@ -200,11 +204,14 @@ class GridEncoder:
 
         for s in scales:
             suf = self.resolution * s
-            res[f"{pref}mean_{suf}"] = uniform_filter(means, s)[(outx_inds, outy_inds)]
+            # Adjust for 
+            empty_fraction = uniform_filter(self.empty.astype(float), s)[(outx_inds, outy_inds)]
+            empty_fraction[empty_fraction == 1] = 0
+            res[f"{pref}mean_{suf}"] = uniform_filter(means, s)[(outx_inds, outy_inds)] / (1-empty_fraction)
             if s == 1:
                 continue
-            res[f"{pref}max_{suf}"] = maximum_filter(means, s)[(outx_inds, outy_inds)]
-            res[f"{pref}min_{suf}"] = minimum_filter(means, s)[(outx_inds, outy_inds)]
+            res[f"{pref}max_{suf}"] = maximum_filter(max_input, s)[(outx_inds, outy_inds)]
+            res[f"{pref}min_{suf}"] = minimum_filter(min_input, s)[(outx_inds, outy_inds)]
 
         return res
 

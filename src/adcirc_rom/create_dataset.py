@@ -14,14 +14,24 @@ from feature_functions import HollandWinds, GridEncoder, save_stats
 from mpi4py import MPI
 from fire import Fire
 
+CORRAL_DIR='/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'
+
 class Dataset:
     '''
     class to create dataset in OpenMPI
     '''
-    def __init__(self):
-        self.bathy = None
+    def __init__(self, pr_dir=CORRAL_DIR, downsample_factor=5, window=5):
+        """Initialize the class
+        """
+        self.pr_dir = pr_dir
+        self.bathy = h5py.File(pr_dir + '/global_bathy.hdf5')['depth'][:]
+        mesh_coords = pd.read_csv(pr_dir + '/global_mesh_coords.csv', index_col=0)
+        self.lats = mesh_coords['lat'].values
+        self.lons = mesh_coords['lon'].values
+        self.downsample_factor = downsample_factor
+        self.window = window
 
-    def _mpi_get_data(self, basin, category, pr_dir):
+    def _mpi_get_data(self, basin, category):
         '''Using OpeMPI to create dataset in Parallel'''
         
         comm = MPI.COMM_WORLD
@@ -29,32 +39,24 @@ class Dataset:
         size = comm.Get_size()
         root = 0
 
-        local_dirs = self._get_dirs(basin, category, pr_dir)
+        local_dirs = self._get_dirs(basin, category)
         #further processing of local directories.
 
         #reading global bathymetery
         self._get_bathy(pr_dir)
 
-        for dir in local_dirs:
-            data = self._get_data(dir, pr_dir)
-            output_dir = "." + basin + category + "/" + dir.split("/")[-1]
-            save_stats(data, output_dir + ".hdf5") 
+        for dirname in local_dirs:
+            data = self._get_data(dirname)
+            output_dir = "." + basin + category + "/" + dirname.split("/")[-1]
+            save_stats(data, output_dir + ".hdf5")
     
-    def _get_bathy(self, pr_dir):
-        self.bathy = h5py.File(pr_dir + '/global_bathy.hdf5')['depth'][:]
-
-    def _get_data(self, dir, pr_dir):
+    def _get_data(self, dirname):
         #reading the contents of the elevation file
         ele_file = '/elevation.hdf5'
         track_file = '/track.csv' 
 
-        #global mesh coordinates
-        mesh_coords = pd.read_csv(pr_dir + '/global_mesh_coords.csv', index_col=0)
-
-        downsample_factor = 10
-
         #read an elevation file
-        f = h5py.File(dir+ele_file, 'r')
+        f = h5py.File(dirname+ele_file, 'r')
         lat_fall = f['landfall_coord'][:][0]
         lon_fall = f['landfall_coord'][:][1]
 
@@ -62,27 +64,23 @@ class Dataset:
             lon_fall = lon_fall-360
             
         zeta_max = f['zeta_max'][:]
-        
         zeta_max[zeta_max<0] = 0
+        trk = pd.read_csv(dirname + track_file)
         
-        
-        trk = pd.read_csv(dir + track_file)
-        
-        # best_track = pd.read_csv("./track.csv")
         holland = HollandWinds(trk)
         times = np.arange(0, len(trk))
-        
-        lats = mesh_coords.loc[f['mesh_inds'][:]]['lat']
-        lons = mesh_coords.loc[f['mesh_inds'][:]]['lon']
-        
+        inds = f['mesh_inds'][:]
+        lats, lons = self.lats[inds], self.lons[inds]
+        # we only need a padding of 1 degree around the window for computations
+        mask = (np.abs(lats-lat_fall) <= self.window + 1) & (np.abs(lons-lon_fall) <= self.window+1)
+        lats, lons, inds = lats[mask], lons[mask], inds[mask]
         coordinates = list(zip(lats, lons))
         
-        bathy_fil = self.bathy[f['mesh_inds'][:]]
+        bathy_fil = self.bathy[inds]
 
         windx = np.zeros((len(times), len(coordinates)))
         windy = np.zeros((len(times), len(coordinates)))
         pres = np.zeros((len(times), len(coordinates)))
-
 
         for i,t in enumerate(times):
             wx, wy, p = holland.evaluate(t, lats, lons)
@@ -90,60 +88,36 @@ class Dataset:
             windy[i, :] = wy
             pres[i, :] = p
         
-        # Create GeoDataFrame from your list of points
-        gdf_points = pd.DataFrame({
-                                        'lats':lats.values,
-                                        'lons':lons.values
-                                    }, index = np.arange(len(lats)))
-        gdf_points['zeta_max'] = zeta_max
-        gdf_points['mesh_inds'] = f['mesh_inds'][:]
-        
+        features = {'lon': lons, 'lat': lats, 'bathy': bathy_fil}
         stats = ['min', 'mean','max']
-        
+        encoder = GridEncoder(lons, lats) 
         # Creating a dictionary to map variable names to their values
         variables = {'windx': windx, 'windy': windy, 'pres': pres, 'winds':np.sqrt(windx**2+windy**2), 'bathy':bathy_fil}
         
         for var_name, variable in variables.items():
-            
             if var_name == 'bathy':
                 
                 scales=[5, 10, 40, 100]
-                grid_solve = GridEncoder(np.array(lons), np.array(lats))
-                stat = grid_solve.encode(variable, scales=scales, name=var_name)
-
-                for key, value in stat.items():
-                    gdf_points[key] = value
-                    
+                features.update(encoder.encode(variable, scales=scales, name=var_name))
             else:
             
                 for st1 in stats: #temporal
-                #     for st2 in stats: #spatial
-                    variable_record = np.zeros((variable.shape[1]))
-                #         for deg in degree:
                     if st1 == 'min':
-                        # var_abs = np.abs(variable)
                         min_indices = np.argmin(variable, axis=0)
                         var = variable[min_indices, np.arange(variable.shape[1])]
-                #         wx = np.min(windx_abs, axis = 0)
                     if st1 == 'mean':
                         var = np.mean(variable, axis = 0)
                     if st1 == 'max':
-                #         wx = np.max(windx_abs, axis = 0)
-                        # var_abs = np.abs(variable)
                         max_indices = np.argmax(variable, axis=0)
                         var = variable[max_indices, np.arange(variable.shape[1])]
                     scales=[5, 10, 40, 100]
-                    grid_solve = GridEncoder(np.array(lons), np.array(lats))
-                    stat = grid_solve.encode(var, scales=scales, name=st1+"_"+var_name)
+                    features.update(encoder.encode(var, scales=scales, name=st1+"_"+var_name))
 
-                    for key, value in stat.items():
-                        gdf_points[key] = value
-
-        rmax_lanfall = trk[(trk['lat']==lat_fall)&((trk['lon']==lon_fall))].rmax.values
-        gdf_points['bathy'] = bathy_fil
-        select_nodes = self._sample_data(gdf_points, lat_fall, lon_fall, rmax_lanfall, downsample_factor=20)
-
-        max_surge_point = gdf_points[gdf_points['zeta_max']==gdf_points['zeta_max'].max()]
+        #rmax_lanfall = trk[(trk['lat']==lat_fall)&((trk['lon']==lon_fall))].rmax.values
+        inds = self._sample_data(features, lat_fall, lon_fall, downsample_factor=self.downsample_factor)
+        print(f"Reduced from {len(lats)} to {len(inds)}")
+        """
+        max_surge_point = np.argmax(features['zeta_max'])
         # Check if the file exists
         file_name = 'record_maxsurge.csv'
         file_exists = os.path.isfile(file_name)
@@ -181,7 +155,7 @@ class Dataset:
         else:
             # If the file does not exist, create an empty DataFrame with the specified columns
             df1.to_csv('./record_maxsurge.csv', index=False)
-    
+        """
     
         # Extracting the coordinates from the filtered GeoDataFrame
         # Substrings to look for
@@ -189,97 +163,29 @@ class Dataset:
 
         # Create the dictionary
         selected_data = {}
-        for col in select_nodes.columns:
+        for col in features:
             if any(substring in col for substring in substrings):
-                selected_data[col] = select_nodes[col].tolist()
+                selected_data[col] = features[col][inds]
 
         return selected_data
 
-    def _windowing(self, gdf_points, center_lat, center_lon, window):
-        # Calculate the boundaries
-        lat_min = center_lat - window
-        lat_max = center_lat + window
-        lon_min = center_lon - window
-        lon_max = center_lon + window
-
-        # Filtering the points within the square boundary
-        points_in_square = gdf_points[
-            (gdf_points.lons >= lon_min) & (gdf_points.lons <= lon_max) &
-            (gdf_points.lats >= lat_min) & (gdf_points.lats <= lat_max)
-        ]
-        
-        points_in_square = points_in_square[points_in_square['bathy']<10]
-    
-        return points_in_square
-    
-    def _sample_data(self, gdf_points, center_lat, center_lon, rmax, downsample_factor):
-    
+    def _sample_data(self, features, center_lat, center_lon, downsample_factor):
+        """Select a subsample of the points
+        """
         # Window for filtering
-        # window = np.ceil(2 * rmax / 111)[0]
-        window = float(5)
-        points_in_square = self._windowing(gdf_points, center_lat, center_lon, window)
-        
-        if len(points_in_square) < 1000:
-            window *= 2
-            points_in_square = self._windowing(gdf_points, center_lat, center_lon, window)
-        
-        
-        if len(points_in_square) // downsample_factor >= 1000:
-            n_samples = int(len(points_in_square) / downsample_factor)
-
-            # # Normalize zeta_max to [0, 1]
-            # zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
-
-            # # Create a Sobol sequence generator for 1-dimensional sampling
-            # sobol_sampler = qmc.Sobol(d=1)
-
-            # # Generate quasi-random samples in the range [0, 1)
-            # samples = sobol_sampler.random(n=n_samples)
-
-            # # Scale the Sobol sequence to match the range of zeta_max
-            # scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
-
-            # # Map Sobol sequence to zeta_max values
-            # sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
-
-            # # Select the rows based on the mapped indices
-            # sampled_indices = points_in_square.index[sampled_zeta_indices]
-            # points_in_square = points_in_square.loc[sampled_indices]
-
-            rand_nodes = np.random.permutation(len(points_in_square))
-
-
-            points_in_square = points_in_square.iloc[rand_nodes[:int(n_samples)]]
-        
-        elif len(points_in_square) > 1000:
-            n_samples = 1000
-            
-            # # Normalize zeta_max to [0, 1]
-            # zeta_max_normalized = (points_in_square['zeta_max'] - points_in_square['zeta_max'].min()) / (points_in_square['zeta_max'].max() - points_in_square['zeta_max'].min())
-
-            # # Create a Sobol sequence generator for 1-dimensional sampling
-            # sobol_sampler = qmc.Sobol(d=1)
-
-            # # Generate quasi-random samples in the range [0, 1)
-            # samples = sobol_sampler.random(n=n_samples)
-
-            # # Scale the Sobol sequence to match the range of zeta_max
-            # scaled_samples = qmc.scale(samples, zeta_max_normalized.min(), zeta_max_normalized.max())
-
-            # # Map Sobol sequence to zeta_max values
-            # sampled_zeta_indices = np.searchsorted(zeta_max_normalized.sort_values(), scaled_samples.flatten())
-
-            # # Select the rows based on the mapped indices
-            # sampled_indices = points_in_square.index[sampled_zeta_indices]
-            # points_in_square = points_in_square.loc[sampled_indices]
-            rand_nodes = np.random.permutation(len(points_in_square))
-
-
-            points_in_square = points_in_square.iloc[rand_nodes[:int(n_samples)]]
-        
-        return points_in_square
+        window = self.window
+        inds = np.where(
+                (features['lon'] <= center_lon+window) &
+                (features['lon'] >= center_lon-window) &
+                (features['lat'] <= center_lat+window) &
+                (features['lat'] >= center_lat-window) &
+                (features['bathy'] < 10)
+               )[0]
+        N = len(inds)
+        downsample_factor = min(N//1000+1, downsample_factor)
+        return inds[::downsample_factor]
     
-    def _get_dirs(self, basin, category, pr_dir):
+    def _get_dirs(self, basin, category):
 
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
@@ -287,13 +193,9 @@ class Dataset:
         root = 0
 
         if rank==0:
-            '''
-            directory to the project - '/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'
-            '''
-            # pr_dir = '../../projects/PRJ-4528'
             #read all the files
 
-            NA_files = sorted(glob.glob(pr_dir+basin+category+'/*'))
+            NA_files = sorted(glob.glob(f"{self.pr_dir}/{basin}/category{category}/*"))
 
             saved_directory = '.'+basin+category
 
@@ -312,15 +214,16 @@ class Dataset:
         return NA_files
 
 
-    def create(self, basin, category, pr_dir = '/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'):
-        self._mpi_get_data(basin, category, pr_dir)
+    def create(self, basin, category):
+        self._mpi_get_data(basin, category)
 
-    def check(self, basin, category, storm_id, pr_dir = '/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'):
-        self._get_bathy(pr_dir)
-        res = self._get_data(f"{pr_dir}/{basin}/category{category}/{storm_id}", pr_dir)
+    def check(self, basin, category, storm_id):
+        """Check outputs for a single storm
+        """
+        res = self._get_data(f"{self.pr_dir}/{basin}/category{category}/{storm_id}")
         for k in res:
-            if min(res[k]) == max(res[k]):
-                print(k)
+            if res[k].min() == res[k].max():
+                print(k, res[k].min())
 
 if __name__ == "__main__":
     Fire(Dataset)
