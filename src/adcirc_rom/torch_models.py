@@ -33,6 +33,82 @@ class FeedForwardNet(nn.Module):
         """
         return self._model(x)
 
+    def collate_fn(self, samples):
+        """Collate and preprocess a batch of samples
+        """
+
+        zetas = []
+        features = []
+        for s in samples:
+            zetas.append(s['zeta_max'])
+            features.append(s['features'])
+
+        return torch.cat(zetas), torch.cat(features)
+
+    def get_loss(self):
+        """Return desired loss function
+        """
+
+        return nn.MSELoss()
+
+class DistributionNet(nn.Module):
+    """Attempt to predict the distribution of surges
+
+    The idea is that instead of predicting the surge for each point, we compute
+    percentiles for each storm.
+    """
+
+    def __init__(self, input_dim, bins=20, num_layers=4, hidden_dim=256):
+        """Initialize the network
+        """
+
+        super().__init__()
+        layers = [nn.Linear(input_dim, hidden_dim), nn.LeakyReLU(), nn.Dropout(p=.5)]
+        for i in range(num_layers-1):
+            layers.extend([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.LeakyReLU(),
+                nn.Dropout(p=0.5)
+            ])
+
+        # The meaning of the outputs is the difference between successive cutoff points
+        # Surge has to be nonnegative, but the minimum surge for a storm could be positive if 
+        # everything is inundated. Consequently, we include an extra output.
+        # The sum of all of the outputs is equal to the peak surge, while the first output is the minumum
+        # Usually the first output will be zero
+        layers.append(nn.Linear(hidden_dim, bins+1))
+        layers.append(nn.ReLU())
+        self.bins = bins
+        self._model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        """Evaluate the model
+        """
+
+        y = self._model(x)
+        return torch.cumsum(y, axis=-1)
+
+    def collate_fn(self, samples):
+        """Combine a batch of storms
+        """
+
+        bins_list = []
+        features_list = []
+        quantiles = torch.linspace(0, 1, self.bins+1)
+        for s in samples:
+            bins_list.append(torch.quantile(s['zeta_max'], quantiles))
+            features_list.append(torch.quantile(s['features'], quantiles, dim=0))
+
+        return torch.stack(bins_list), torch.stack(features_list)
+
+    def get_loss(self):
+        """Return the loss function
+        """
+
+        # for now
+        return nn.MSELoss()
+
 # # DenseNet attempt
 # class DenseBlock(nn.Module):
 #     def __init__(self, input_dim, growth_rate, num_layers, dropout_rate=0.0):

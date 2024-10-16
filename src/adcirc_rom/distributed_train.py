@@ -15,7 +15,7 @@ except:
 
 from torch import nn, optim
 from torch.utils import data
-from adcirc_rom.torch_models import FeedForwardNet
+from adcirc_rom.torch_models import FeedForwardNet, DistributionNet
 from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument('--dist-url', default='env://', type=str, help='url used to set up distributed training')
     parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
     parser.add_argument('--local_rank', default=-1, type=int, help='local rank for distributed training')
+    parser.add_argument('--model', default='feedforward', choices=['feedforward', 'distribution'], help='Model to use')
     args = parser.parse_args()
     return args
 
@@ -57,7 +58,7 @@ def main(args):
         size = int(os.environ["SLURM_NTASKS"])
 
     args.world_size = size
-    args.distributed = args.world_size > 1
+    args.distributed = args.world_size > 1 or True
     ngpus_per_node = torch.cuda.device_count()
 
     os.environ['MASTER_PORT'] = "55667"
@@ -82,8 +83,14 @@ def main(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
     ### model ###
-    model = FeedForwardNet(160)
-    
+    input_dim = 161
+    if args.model == 'feedforward':
+        model = FeedForwardNet(input_dim)
+    elif args.model == 'distribution':
+        model = DistributionNet(input_dim)
+    else:
+        raise ValueError(f"Model type '{args.model}' not recognized!")
+   
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
@@ -113,14 +120,15 @@ def main(args):
 
     train_sampler = data.distributed.DistributedSampler(train_dataset, shuffle=True)
     val_sampler = data.distributed.DistributedSampler(val_dataset, shuffle=False) 
+    collate_fn = model_without_ddp.collate_fn
+    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=train_sampler, collate_fn=collate_fn, drop_last=True)
+    val_loader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, collate_fn=collate_fn, drop_last=True)
+    test_loader = data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
 
-    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=train_sampler, collate_fn=tc_collate_fn, drop_last=True)
-    val_loader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, collate_fn=tc_collate_fn, drop_last=True)
-    test_loader = data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, collate_fn=tc_collate_fn, drop_last=True)
-
-
+    print("Created data loaders")
     torch.backends.cudnn.benchmark = True
-    criterion = nn.MSELoss()
+    # Allow for custom model loss function
+    criterion = model_without_ddp.get_loss() #nn.MSELoss()
 
     # log file
     if args.rank == 0:
@@ -167,6 +175,7 @@ def main(args):
 def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
     """Train model for one epoch
     """
+    print("Entered train_one_epoch")
     model.train()
     epoch_loss = 0.0
     for i, (target, features) in enumerate(train_loader):
