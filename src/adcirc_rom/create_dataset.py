@@ -109,7 +109,7 @@ class Dataset:
                 
                 scales=[5, 10, 40, 100]
                 grid_solve = GridEncoder(np.array(lons), np.array(lats))
-                stat = grid_solve.encode(var, scales=scales, name=var_name)
+                stat = grid_solve.encode(variable, scales=scales, name=var_name)
 
                 for key, value in stat.items():
                     gdf_points[key] = value
@@ -121,16 +121,16 @@ class Dataset:
                     variable_record = np.zeros((variable.shape[1]))
                 #         for deg in degree:
                     if st1 == 'min':
-                        var_abs = np.abs(variable)
-                        min_indices = np.argmin(var_abs, axis=0)
+                        # var_abs = np.abs(variable)
+                        min_indices = np.argmin(variable, axis=0)
                         var = variable[min_indices, np.arange(variable.shape[1])]
                 #         wx = np.min(windx_abs, axis = 0)
                     if st1 == 'mean':
                         var = np.mean(variable, axis = 0)
                     if st1 == 'max':
                 #         wx = np.max(windx_abs, axis = 0)
-                        var_abs = np.abs(variable)
-                        max_indices = np.argmax(var_abs, axis=0)
+                        # var_abs = np.abs(variable)
+                        max_indices = np.argmax(variable, axis=0)
                         var = variable[max_indices, np.arange(variable.shape[1])]
                     scales=[5, 10, 40, 100]
                     grid_solve = GridEncoder(np.array(lons), np.array(lats))
