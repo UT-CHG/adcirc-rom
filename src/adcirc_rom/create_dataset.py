@@ -314,6 +314,13 @@ class Dataset:
 
     def create(self, basin, category, pr_dir = '/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'):
         self._mpi_get_data(basin, category, pr_dir)
-    
+
+    def check(self, basin, category, storm_id, pr_dir = '/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'):
+        self._get_bathy(pr_dir)
+        res = self._get_data(f"{pr_dir}/{basin}/category{category}/{storm_id}", pr_dir)
+        for k in res:
+            if min(res[k]) == max(res[k]):
+                print(k)
+
 if __name__ == "__main__":
     Fire(Dataset)
