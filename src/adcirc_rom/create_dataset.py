@@ -20,7 +20,9 @@ class Dataset:
     '''
     class to create dataset in OpenMPI
     '''
-    def __init__(self, pr_dir=CORRAL_DIR, downsample_factor=5, window=5):
+    def __init__(self, pr_dir=CORRAL_DIR, downsample_factor=5, window=5,
+              output_dir="."
+            ):
         """Initialize the class
         """
         self.pr_dir = pr_dir
@@ -30,6 +32,7 @@ class Dataset:
         self.lons = mesh_coords['lon'].values
         self.downsample_factor = downsample_factor
         self.window = window
+        self.output_dir = output_dir
 
     def _mpi_get_data(self, basin, category):
         '''Using OpeMPI to create dataset in Parallel'''
@@ -42,12 +45,9 @@ class Dataset:
         local_dirs = self._get_dirs(basin, category)
         #further processing of local directories.
 
-        #reading global bathymetery
-        self._get_bathy(pr_dir)
-
         for dirname in local_dirs:
             data = self._get_data(dirname)
-            output_dir = "." + basin + category + "/" + dirname.split("/")[-1]
+            output_dir = f"{self.output_dir}/{basin}/category{category}/{dirname.split('/')[-1]}"
             save_stats(data, output_dir + ".hdf5")
     
     def _get_data(self, dirname):
@@ -115,7 +115,7 @@ class Dataset:
 
         #rmax_lanfall = trk[(trk['lat']==lat_fall)&((trk['lon']==lon_fall))].rmax.values
         inds = self._sample_data(features, lat_fall, lon_fall, downsample_factor=self.downsample_factor)
-        print(f"Reduced from {len(lats)} to {len(inds)}")
+        #print(f"Reduced from {len(lats)} to {len(inds)}")
         """
         max_surge_point = np.argmax(features['zeta_max'])
         # Check if the file exists
@@ -197,7 +197,8 @@ class Dataset:
 
             NA_files = sorted(glob.glob(f"{self.pr_dir}/{basin}/category{category}/*"))
 
-            saved_directory = '.'+basin+category
+            saved_directory = f"{self.output_dir}/{basin}/category{category}"
+            os.makedirs(saved_directory, exist_ok=True)
 
             existing_files = sorted(glob.glob(saved_directory+"/*.hdf5"))
             existing_files = [x.split("/")[-1] for x in existing_files]
