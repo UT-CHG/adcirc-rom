@@ -15,25 +15,33 @@ except:
 
 from torch import nn, optim
 from torch.utils import data
-from adcirc_rom.torch_models import FeedForwardNet
+from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer
 from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import time
+import wandb
+
+def set_seed(seed=36):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--net', default='feedforward', type=str)
-    parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
-    parser.add_argument('--batch_size', default=16, type=int, help='batch size per GPU')
+    parser.add_argument('--lr', default=1e-6, type=float, help='learning rate')
+    parser.add_argument('--batch_size', default=8, type=int, help='batch size per GPU')
     parser.add_argument('--gpu', default=None, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, help='start epoch number (useful on restarts)')
-    parser.add_argument('--epochs', default=10, type=int, help='number of total epochs to run')
-    parser.add_argument('--datadir', default="/scratch1/06307/clos21/shared/prateek-updated/NA")
+    parser.add_argument('--epochs', default=500, type=int, help='number of total epochs to run')
+    parser.add_argument('--datadir', default="/scratch/06307/clos21/public/prateek-updated/Texas")
+    #parser.add_argument('--datadir', default="/scratch/06307/clos21/public/prateek-updated/v3-new/NA")
     parser.add_argument('--workers', default=8, type=int, help="Num workers for dataloader")
     parser.add_argument('--save_dir', default='./trained_model', type=str, help='directory to save checkpoints and final model')
     parser.add_argument('--test', action='store_true', help='run test dataset evaluation')
-
+    parser.add_argument('--seed', default=36, type=int, help='random seed for reproducibility')
+    
     parser.add_argument('--world-size', default=-1, type=int, help='number of nodes for distributed training')
     parser.add_argument('--rank', default=-1, type=int, help='node rank for distributed training')
     parser.add_argument('--dist-url', default='env://', type=str, help='url used to set up distributed training')
@@ -43,6 +51,8 @@ def parse_args():
     return args
 
 def main(args):
+    set_seed(args.seed)
+    
     start_time = time.time()
     print("starting main function")
     print(f"args.test = {args.test}")
@@ -82,8 +92,20 @@ def main(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
     ### model ###
-    model = FeedForwardNet(160)
+    # ANN
+    model = FeedForwardNet(80)
     
+    # FTT
+    #model = SimpleFTTransformer(
+    #    n_features=161,   # same as your input_dim
+    #    d_token=16,      # embedding dimension (try 16/32/64, etc.)
+    #    n_blocks=1,      # number of transformer blocks
+    #    n_heads=1,       # must divide d_token
+    #    ff_factor=4.0,
+    #    dropout=0.1
+    #)
+
+
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
@@ -106,9 +128,9 @@ def main(args):
     scheduler = CosineAnnealingLR(optimizer, T_max=10) # add this to adjustable learning rate
     
     ### data loading ###
-    train_dataset = SyntheticTCDataset(args.datadir)
-    val_dataset = SyntheticTCDataset(args.datadir, val=True)
-    test_dataset = SyntheticTCDataset(args.datadir, test=True)
+    train_dataset = SyntheticTCDataset(args.datadir, seed=args.seed)
+    val_dataset = SyntheticTCDataset(args.datadir, val=True, seed=args.seed)
+    test_dataset = SyntheticTCDataset(args.datadir, test=True, seed=args.seed)
 
 
     train_sampler = data.distributed.DistributedSampler(train_dataset, shuffle=True)
@@ -122,9 +144,11 @@ def main(args):
     torch.backends.cudnn.benchmark = True
     criterion = nn.MSELoss()
 
+
     # log file
     if args.rank == 0:
         log_file = open(os.path.join(args.save_dir, 'training_log.txt'), 'w')
+        wandb.init(project="dev_feedforward", config=vars(args))
 
     # Training and validation loop
     for epoch in range(args.start_epoch, args.epochs):
@@ -145,6 +169,11 @@ def main(args):
             scheduler.step(val_loss)
             save_checkpoint(model_without_ddp, optimizer, epoch, args.save_dir)
             log_file.write(f"Epoch {epoch} - Training Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_duration:.2f} minutes\n")
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss
+            })
     
     # save the final model
     if args.rank == 0:  
@@ -156,6 +185,7 @@ def main(args):
         print(f'Test Loss: {test_loss}')
         if args.rank == 0:
             log_file.write(f"Test Loss: {test_loss}\n")
+            wandb.log({"test_loss": test_loss})
     else:
         print("Test flag not set, skipping test evaluation")
     if args.rank == 0:
@@ -174,7 +204,7 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
         features, target = features.cuda(args.gpu), target.cuda(args.gpu)
         model.zero_grad()
         preds = model(features)
-        err = criterion(preds, target)
+        err = criterion(preds, target).sqrt()
         err.backward()
         # grad clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -183,7 +213,7 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
             epoch_loss += err.item()  
         print(err.item())
 
-        if i % 100 == 0:
+        if i % 50 == 0:
             torch.cuda.empty_cache()
         sys.stdout.flush()
 
@@ -203,7 +233,7 @@ def validate(val_loader, model, criterion, epoch, args):
             target = target.unsqueeze(1)  
             features, target = features.cuda(args.gpu), target.cuda(args.gpu)
             preds = model(features)
-            err = criterion(preds, target)
+            err = criterion(preds, target).sqrt()
             val_loss += err.item()
 
     val_loss /= len(val_loader)
@@ -222,7 +252,7 @@ def test(test_loader, model, criterion, args):
             target = target.unsqueeze(1)  
             features, target = features.cuda(args.gpu), target.cuda(args.gpu)
             preds = model(features)
-            err = criterion(preds, target)
+            err = criterion(preds, target).sqrt()
             test_loss += err.item()
 
     test_loss /= len(test_loader)
