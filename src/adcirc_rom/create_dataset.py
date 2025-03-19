@@ -1,27 +1,32 @@
 import numpy as np 
+print("Imported numpy")
 import glob
+print("Imported glob")
 import h5py
+print("imported h5py")
 import pandas as pd
-import math
-import geopandas as gpd
-from shapely.geometry import Point
-from haversine import haversine_vector, haversine
-from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
-import matplotlib.pyplot as plt
+print("Imported pandas.")
 import os
-from scipy.stats import qmc
+print("Imported os")
 from feature_functions import HollandWinds, GridEncoder, save_stats
-from mpi4py import MPI
+#from mpi4py import MPI
+print("Imported feature functions")
 from fire import Fire
+print("Imported Fire")
 
 CORRAL_DIR='/corral/projects/NHERI/projects/8647283878534835730-242ac117-0001-012'
+BASINS = ["EP", "NA", "NI", "SI", "SP", "WP"]
+# have to do this on Frontera because mpi4py currently hangs on import. . . .
+rank = int(os.getenv("PMI_RANK", 0))
+size = int(os.getenv("PMI_SIZE", 1))
+print(f"Rank: {rank}, size: {size}")
 
 class Dataset:
     '''
     class to create dataset in OpenMPI
     '''
     def __init__(self, pr_dir=CORRAL_DIR, downsample_factor=5, window=5,
-              output_dir="."
+              output_dir=".", input_format='packed'
             ):
         """Initialize the class
         """
@@ -33,43 +38,49 @@ class Dataset:
         self.downsample_factor = downsample_factor
         self.window = window
         self.output_dir = output_dir
+        self.input_format = input_format
+        if input_format not in ['packed', 'unpacked']: raise ValueError(f"Unrecognized input format: {input_format}!")
+        print("Initialized class")
 
-    def _mpi_get_data(self, basin, category):
-        '''Using OpeMPI to create dataset in Parallel'''
+    def _mpi_get_data(self):
+        """Process dataset in parallel."""
         
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-        root = 0
+        local_storms = self._get_storms()
 
-        local_dirs = self._get_dirs(basin, category)
-        #further processing of local directories.
+        for storm in local_storms:
+            data = self._get_data(storm)
+            save_stats(data, storm['outfile'])
 
-        for dirname in local_dirs:
-            data = self._get_data(dirname)
-            output_dir = f"{self.output_dir}/{basin}/category{category}/{dirname.split('/')[-1]}"
-            save_stats(data, output_dir + ".hdf5")
-    
-    def _get_data(self, dirname):
-        #reading the contents of the elevation file
-        ele_file = '/elevation.hdf5'
-        track_file = '/track.csv' 
+    def _get_data(self, storm):
+        
+        if self.input_format == "packed":
+            dirname = storm['indir']
+            #reading the contents of the elevation file
+            ele_file = '/elevation.hdf5'
+            track_file = dirname+'/track.csv' 
 
-        #read an elevation file
-        f = h5py.File(dirname+ele_file, 'r')
-        lat_fall = f['landfall_coord'][:][0]
-        lon_fall = f['landfall_coord'][:][1]
+            #read an elevation file
+            f = h5py.File(dirname+ele_file, 'r')
+            lat_fall = f['landfall_coord'][:][0]
+            inds = f['mesh_inds'][:]
+            zeta_max = f['zeta_max'][:]
+            lon_fall = f['landfall_coord'][:][1]
+        elif self.input_format == "unpacked":
+            dirname = storm['indir']
+            lat_fall, lon_fall = storm['landfall']
+            f = np.load(dirname+"/outputs/maxele.npz")
+            zeta_max = f["zeta"]
+            inds = np.arange(len(zeta_max))
+            track_file = storm['track'] 
 
         if lon_fall > 180:
             lon_fall = lon_fall-360
             
-        zeta_max = f['zeta_max'][:]
         zeta_max[zeta_max<0] = 0
-        trk = pd.read_csv(dirname + track_file)
+        trk = pd.read_csv(track_file)
         
         holland = HollandWinds(trk)
         times = np.arange(0, len(trk))
-        inds = f['mesh_inds'][:]
         lats, lons = self.lats[inds], self.lons[inds]
         # we only need a padding of 1 degree around the window for computations
         mask = (np.abs(lats-lat_fall) <= self.window + 1) & (np.abs(lons-lon_fall) <= self.window+1)
@@ -113,49 +124,7 @@ class Dataset:
                     scales=[5, 10, 40, 100]
                     features.update(encoder.encode(var, scales=scales, name=st1+"_"+var_name))
 
-        #rmax_lanfall = trk[(trk['lat']==lat_fall)&((trk['lon']==lon_fall))].rmax.values
         inds = self._sample_data(features, lat_fall, lon_fall, downsample_factor=self.downsample_factor)
-        #print(f"Reduced from {len(lats)} to {len(inds)}")
-        """
-        max_surge_point = np.argmax(features['zeta_max'])
-        # Check if the file exists
-        file_name = 'record_maxsurge.csv'
-        file_exists = os.path.isfile(file_name)
-
-        # Define the data for the new DataFrame
-        data = {
-            'Hurricane': [dir.split('/')[-1]],
-            'Basin': [dir.split('/')[-3]],
-            'Category': [dir.split('/')[-2]],
-            'landfall_lat': [lat_fall],
-            'landfall_lon': [lon_fall],
-            'Max_Surge_recorded':[select_nodes.zeta_max.max()],
-            'Max_Surge': [max_surge_point.zeta_max.values[0]], 
-            'Max_surge_included': [max_surge_point.index.isin(select_nodes.index)[0]],
-            'Max_Surge_lat': [max_surge_point.lats.values[0]],
-            'Max_Surge_lon': [max_surge_point.lons.values[0]], 
-            'Landfall_to_MaxSurge': [haversine((lat_fall, lon_fall), (max_surge_point.lats.values[0], max_surge_point.lons.values[0]))]
-        }
-
-        # Define the index
-        index = [dir.split('/')[-1]]
-
-        # Create the new DataFrame
-        df1 = pd.DataFrame(index=index, data=data)
-
-        
-
-        if file_exists:
-            # If the file exists, open it
-            df = pd.read_csv(file_name, na_values=[], keep_default_na=False)
-            # Concatenate the new DataFrame with the existing one
-            df = pd.concat([df, df1], axis=0)
-
-            df.to_csv('./record_maxsurge.csv', index=False)
-        else:
-            # If the file does not exist, create an empty DataFrame with the specified columns
-            df1.to_csv('./record_maxsurge.csv', index=False)
-        """
     
         # Extracting the coordinates from the filtered GeoDataFrame
         # Substrings to look for
@@ -185,38 +154,58 @@ class Dataset:
         downsample_factor = min(N//1000+1, downsample_factor)
         return inds[::downsample_factor]
     
-    def _get_dirs(self, basin, category):
+    def _get_storms(self):
 
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-        root = 0
-
-        if rank==0:
-            #read all the files
-
-            NA_files = sorted(glob.glob(f"{self.pr_dir}/{basin}/category{category}/*"))
+        basin, category = self.basin, self.category
+        #read all the files
+        if self.input_format == "packed":
+            dirnames = sorted(glob.glob(f"{self.pr_dir}/{basin}/category{category}/*"))[rank::size]
 
             saved_directory = f"{self.output_dir}/{basin}/category{category}"
             os.makedirs(saved_directory, exist_ok=True)
+            storms = []
+            for dirname in dirnames:
+              storm_id = dirname.split("/")[-1]
+              outfile = saved_directory+"/"+storm_id+".hdf5"
+              if os.path.exists(outfile): continue
+              storms.append({"indir": dirname, "outfile": outfile})
 
-            existing_files = sorted(glob.glob(saved_directory+"/*.hdf5"))
-            existing_files = [x.split("/")[-1] for x in existing_files]
-            existing_files = [x.split(".")[0] for x in existing_files]
+        elif self.input_format == "unpacked":
+            storms = []
+            missing = 0
+            existing = 0
+            print("starting glob.")
+            for dirname in sorted(glob.glob(f"{self.pr_dir}/run*/"))[rank::size]:
+               print("processing ", dirname)
+               landfalls = pd.read_csv(dirname+"/landfalls.csv")
+               for i in range(len(landfalls)):
+                   row = landfalls.iloc[i]
+                   stormdir = dirname+f"/unpacked_inputs/storm{i:02d}/"
+                   if not os.path.exists(stormdir+"outputs/maxele.npz"):
+                      print("Missing", stormdir+"outputs/maxele.npz")
+                      missing += 1
+                      continue
+                   basin = BASINS[int(row['basin'])]
+                   outdir = f"{self.output_dir}/{basin}/category{int(row['cat'])}/"
+                   os.makedirs(outdir, exist_ok=True)
+                   storm_id = f"{int(row['year'])}{int(row['month']):02d}{int(row['tcnum']):02d}{int(row['tstep']):03d}"
+                   outfile = outdir+"/"+storm_id+".hdf5"
+                   if os.path.exists(outfile):
+                       existing += 1
+                       continue
+                   storms.append({
+                     'indir': stormdir, 'outfile':outfile,
+                     'landfall': (row['lat'], row['lon']),
+                     'track': dirname+f"/track{i:02d}.csv"})
+        
+        print("Creating Dataset for {} Storms".format(len(storms)))
+        return storms
 
-            NA_files = [x for x in NA_files if x.split('/')[-1] not in existing_files]
 
-            print("Creating Dataset for {} Files".format(len(NA_files)))
-        else:
-            NA_files = None
-
-        NA_files = comm.bcast(NA_files, root=root)
-        NA_files = NA_files[int(len(NA_files)*rank/size):int(len(NA_files)*(rank+1)/size)]
-        return NA_files
-
-
-    def create(self, basin, category):
-        self._mpi_get_data(basin, category)
+    def create(self, basin=None, category=None):
+        self.basin = basin
+        self.category = category
+        self._mpi_get_data()
 
     def check(self, basin, category, storm_id):
         """Check outputs for a single storm
@@ -227,4 +216,5 @@ class Dataset:
                 print(k, res[k].min())
 
 if __name__ == "__main__":
+    print("Imported libraries, entering script.")
     Fire(Dataset)

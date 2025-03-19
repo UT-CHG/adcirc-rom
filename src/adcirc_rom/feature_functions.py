@@ -4,7 +4,6 @@ import h5py
 import pandas as pd
 import math
 import geopandas as gpd
-from shapely.geometry import Point
 from haversine import haversine_vector
 
 from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
