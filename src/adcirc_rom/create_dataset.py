@@ -33,6 +33,11 @@ class Dataset:
         self.pr_dir = pr_dir
         self.bathy = h5py.File(pr_dir + '/global_bathy.hdf5')['depth'][:]
         mesh_coords = pd.read_csv(pr_dir + '/global_mesh_coords.csv', index_col=0)
+        if os.path.exists(pr_dir+"/background_zeta.npz"):
+            self.zeta_background = np.load(pr_dir+"/background_zeta.npz")["zeta"]
+        else:
+            print(f"Warning: Missing background zeta, could not find 'background_zeta.npz' in '{self.pr_dir}'")
+            self.zeta_background = None
         self.lats = mesh_coords['lat'].values
         self.lons = mesh_coords['lon'].values
         self.downsample_factor = downsample_factor
@@ -84,10 +89,11 @@ class Dataset:
         lats, lons = self.lats[inds], self.lons[inds]
         # we only need a padding of 1 degree around the window for computations
         mask = (np.abs(lats-lat_fall) <= self.window + 1) & (np.abs(lons-lon_fall) <= self.window+1)
-        lats, lons, inds = lats[mask], lons[mask], inds[mask]
+        lats, lons, inds, zeta_max = lats[mask], lons[mask], inds[mask], zeta_max[mask]
         coordinates = list(zip(lats, lons))
         
         bathy_fil = self.bathy[inds]
+        zeta_diff = zeta_max - self.zeta_background[inds]
 
         windx = np.zeros((len(times), len(coordinates)))
         windy = np.zeros((len(times), len(coordinates)))
@@ -99,7 +105,7 @@ class Dataset:
             windy[i, :] = wy
             pres[i, :] = p
         
-        features = {'lon': lons, 'lat': lats, 'bathy': bathy_fil}
+        features = {'lon': lons, 'lat': lats, 'bathy': bathy_fil, 'zeta_max': zeta_max, 'zeta_diff': zeta_diff}
         stats = ['min', 'mean','max']
         encoder = GridEncoder(lons, lats) 
         # Creating a dictionary to map variable names to their values
@@ -132,6 +138,8 @@ class Dataset:
 
         # Create the dictionary
         selected_data = {}
+        N = len(features['zeta_max'])
+        assert all(len(features[c]) == N for c in features)
         for col in features:
             if any(substring in col for substring in substrings):
                 selected_data[col] = features[col][inds]
@@ -148,7 +156,7 @@ class Dataset:
                 (features['lon'] >= center_lon-window) &
                 (features['lat'] <= center_lat+window) &
                 (features['lat'] >= center_lat-window) &
-                (features['bathy'] < 10)
+                (features['bathy'] > -10)
                )[0]
         N = len(inds)
         downsample_factor = min(N//1000+1, downsample_factor)
@@ -201,6 +209,35 @@ class Dataset:
         print("Creating Dataset for {} Storms".format(len(storms)))
         return storms
 
+    def make_background(self, min_files=20):
+        """Make background elevation."""
+        npzfiles = []
+        if self.input_format == "unpacked":
+            rundirs = sorted(glob.glob(f"{self.pr_dir}/run*/"))
+            for dirname in rundirs:
+               landfalls = pd.read_csv(dirname+"/landfalls.csv")
+               for i in range(len(landfalls)):
+                   row = landfalls.iloc[i]
+                   npzfile = dirname+f"/unpacked_inputs/storm{i:02d}/outputs/maxele.npz"
+                   if not os.path.exists(npzfile):
+                      continue
+                   npzfiles.append(npzfile)
+               if len(npzfiles) > min_files: break
+            
+            zetas = []
+            for npzfile in npzfiles:
+                ark = np.load(npzfile)
+                zetas.append(ark["zeta"])
+
+            all_zetas = np.column_stack(zetas)
+            all_zetas[all_zetas<0] = 0
+            print(all_zetas.shape)
+            background_zeta = np.median(all_zetas, axis=1)
+            print(background_zeta, background_zeta.shape)
+            np.savez(f"{self.pr_dir}/background_zeta.npz", zeta=background_zeta)
+
+        else:
+            raise NotImplementedError()  
 
     def create(self, basin=None, category=None):
         self.basin = basin
