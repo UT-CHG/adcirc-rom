@@ -1,14 +1,9 @@
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
-# from linformer import Linformer
+import torch.nn.functional as F
 
 class FeedForwardNet(nn.Module):
-    """Simple shallow feed-forward network with Dropout and BatchNorm
-    """
-    def __init__(self, input_dim, size=3):
-        """Initialize the network
-        """
+    def __init__(self, input_dim, size=5):
         super().__init__()
         self._size = size
         self._input_dim = input_dim
@@ -20,12 +15,10 @@ class FeedForwardNet(nn.Module):
         for last_size, curr_size in zip(sizes[:-1], sizes[1:]):
             layers.append(nn.Linear(last_size, curr_size))
             if curr_size > 1:
-                layers.append(nn.BatchNorm1d(curr_size)) # normalization
+                layers.append(nn.BatchNorm1d(curr_size)) 
                 layers.append(nn.LeakyReLU())
-                layers.append(nn.Dropout(p=0.5)) # dropout
 
-        # use relu for output activation
-        layers.append(nn.ReLU()) 
+        layers.append(nn.ReLU())
         self._model = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -33,23 +26,6 @@ class FeedForwardNet(nn.Module):
         """
         return self._model(x)
 
-    def collate_fn(self, samples):
-        """Collate and preprocess a batch of samples
-        """
-
-        zetas = []
-        features = []
-        for s in samples:
-            zetas.append(s['zeta_max'])
-            features.append(s['features'])
-
-        return torch.cat(zetas), torch.cat(features)
-
-    def get_loss(self):
-        """Return desired loss function
-        """
-
-        return nn.MSELoss()
 
 class DistributionNet(nn.Module):
     """Attempt to predict the distribution of surges
@@ -89,94 +65,98 @@ class DistributionNet(nn.Module):
         y = self._model(x)
         return torch.cumsum(y, axis=-1)
 
-    def collate_fn(self, samples):
-        """Combine a batch of storms
-        """
+    #def collate_fn(self, samples):
+    #    """Combine a batch of storms
+    #    """
 
-        bins_list = []
-        features_list = []
-        quantiles = torch.linspace(0, 1, self.bins+1)
-        for s in samples:
-            bins_list.append(torch.quantile(s['zeta_max'], quantiles))
-            features_list.append(torch.quantile(s['features'], quantiles, dim=0))
+     #   bins_list = []
+      #  features_list = []
+       # quantiles = torch.linspace(0, 1, self.bins+1)
+        #for s in samples:
+         #   bins_list.append(torch.quantile(s['zeta_max'], quantiles))
+          #  features_list.append(torch.quantile(s['features'], quantiles, dim=0))
 
-        return torch.stack(bins_list), torch.stack(features_list)
+        #return torch.stack(bins_list), torch.stack(features_list)
 
-    def get_loss(self):
-        """Return the loss function
-        """
+#    def get_loss(self):
+#        """Return the loss function
+#        """
 
         # for now
-        return nn.MSELoss()
+#        return nn.MSELoss()
 
-# # DenseNet attempt
-# class DenseBlock(nn.Module):
-#     def __init__(self, input_dim, growth_rate, num_layers, dropout_rate=0.0):
 
-#         super(DenseBlock, self).__init__()
-#         self.layers = nn.ModuleList()
-#         self.dropout_rate = dropout_rate
-#         for i in range(num_layers):
-#             self.layers.append(nn.Sequential(
-#                 nn.Linear(input_dim + i * growth_rate, growth_rate),
-#                 nn.BatchNorm1d(growth_rate),
-#                 nn.ReLU(inplace=True),
-#                 nn.Dropout(dropout_rate)
-#             ))
-#     def forward(self, x):
-#         outputs = [x]
-#         for layer in self.layers:
-#             new_input = torch.cat(outputs, dim=1)
-#             out = layer(new_input)
-#             outputs.append(out)
-#         return torch.cat(outputs, dim=1)
+class SimpleTransformerBlock(nn.Module):
+    """
+    four main parts of this model:
+      1. multi head self attention for feature correlation
+      2. Skip connection + Batchnorm
+      3. ANN (2 layers for now... probably more later)
+      4. Skip connection + Batchnorm again
+    """
+    def __init__(self, d_model: int, n_heads: int, dim_feedforward: int, dropout: float = 0.1):
+        super().__init__()
+        #Multi head self attention
+        self.mha = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        
+        #Ann
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        self.norm1 = nn.BatchNorm1d(d_model)
+        self.norm2 = nn.BatchNorm1d(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
 
-# class DenseNet(nn.Module):
-#     def __init__(self, input_dim, growth_rate, block_layers, num_blocks, output_dim=1, dropout_rate=0.0):
-#         super(DenseNet, self).__init__()
-#         self.blocks = nn.ModuleList()
-#         num_features = input_dim
-#         for _ in range(num_blocks):
-#             block = DenseBlock(num_features, growth_rate, block_layers, dropout_rate)
-#             self.blocks.append(block)
-#             num_features += block_layers * growth_rate
-#         self.fc = nn.Linear(num_features, output_dim)
-#         self._initialize_weights()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x shape: (batch_size, seq_len, d_model) where seq_len = n_features
+        """
+        attn_output, _ = self.mha(x, x, x) 
+        x = x + self.dropout1(attn_output)
+        x = self.norm1(x.transpose(1, 2)).transpose(1, 2)
+        ff_output = self.linear2(F.gelu(self.linear1(x)))  
+        x = x + self.dropout2(ff_output)
+        x = self.norm2(x.transpose(1, 2)).transpose(1, 2)
 
-#     def forward(self, x):
-#         for block in self.blocks:
-#             x = block(x)
-#         x = self.fc(x)
-#         return x
+        return x
 
-#     def _initialize_weights(self):
-#         for m in self.modules():
-#             if isinstance(m, nn.Linear):
-#                 nn.init.kaiming_normal_(m.weight)
-#                 if m.bias is not None:
-#                     nn.init.constant_(m.bias, 0)
-#             elif isinstance(m, nn.BatchNorm1d):
-#                 nn.init.constant_(m.weight, 1)
-#                 nn.init.constant_(m.bias, 0)
-    
-# # Linear transformer attempt
-# class LinformerAttention(nn.Module):
-#     def __init__(self, input_dim, num_heads, k):
 
-#         super(LinformerAttention, self).__init__()
-#         # print('Currently on LINFORMER')
-#         self.linformer = Linformer(
-#             dim=input_dim,
-#             seq_len=input_dim,  
-#             depth=6, # num of layers
-#             heads=num_heads,
-#             k=k,               
-#             dropout=0.1
-#         )
-#         self.fc = nn.Linear(input_dim, 1)
+class SimpleFTTransformer(nn.Module):
 
-#     def forward(self, x):
-#         x = x.unsqueeze(1)
-#         x = self.linformer(x)
-#         x = self.fc(x[:, 0, :])  
-#         return x
+    def __init__(
+        self,
+        n_features: int = 80,
+        d_token: int = 32,
+        n_blocks: int = 2,
+        n_heads: int = 4,
+        ff_factor: float = 4.0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.n_features = n_features
+        self.d_token = d_token
+
+        #scale + bias for each feature
+        self.weight = nn.Parameter(torch.randn(n_features, d_token) * 0.02)
+        self.bias   = nn.Parameter(torch.zeros(n_features, d_token))
+
+        #N blocks
+        dim_feedforward = int(d_token * ff_factor)
+        self.blocks = nn.ModuleList([
+            SimpleTransformerBlock(d_token, n_heads, dim_feedforward, dropout=dropout)
+            for _ in range(n_blocks)
+        ])
+
+        #Project to output (dimension is 1)
+        self.head = nn.Linear(n_features * d_token, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate the network
+        """
+        x = x.unsqueeze(-1) * self.weight + self.bias
+        for block in self.blocks:
+            x = block(x)
+        x = x.reshape(x.size(0), -1)
+        out = self.head(x)
+        return out
