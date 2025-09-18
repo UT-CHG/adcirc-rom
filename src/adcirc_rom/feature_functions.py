@@ -34,7 +34,7 @@ class HollandWinds:
     """A Python class for generating winds with the symmetric Holland model
     """
 
-    def __init__(self, track, dt=1):
+    def __init__(self, track, dt=3):
         """Initialize the wind model
 
         Parameters
@@ -85,7 +85,7 @@ class HollandWinds:
         """
         # do interpolation
         ind = t/self.dt
-        if ind < 0 or ind > len(self.lat):
+        if ind < 0 or ind >= len(self.lat):
             # out of bounds - zero winds and background pressure
             return np.zeros_like(lats), np.zeros_like(lats), np.full_like(lats, pback)
 
@@ -125,6 +125,17 @@ class HollandWinds:
         mul = np.abs(ur)/vmax
         return ux + mul * vtx, uy + mul * vty, pres_prof
 
+    def evaluate_many(self, times, lats, lons):
+        """Evaluate the model over a time series and return stacked output."""
+        
+        nt = len(times)
+        outshape = (nt,) + lats.shape
+        flat_lons, flat_lats = lons.flatten(), lats.flatten()
+        flatshape = (nt,len(flat_lons)) 
+        windx, windy, pres = np.zeros(flatshape), np.zeros(flatshape), np.full(flatshape, pback)
+        for i, t in enumerate(times):
+            windx[i], windy[i], pres[i] = self.evaluate(t, flat_lats, flat_lons)
+        return windx.reshape(flatshape), windy.reshape(flatshape), pres.reshape(flatshape)
     
 class GridEncoder:
     """A class to represent spatial aggregations of mesh variables like bathymetry, wind, pressure, etc."""
