@@ -28,7 +28,7 @@ deg2m=np.pi*radius/180.  # ds on cicle equals ds=r*dth - dth=pi/180
 one2ten=0.8928  # coefficient for going from 1m to 10m in velocities
 BLAdj=0.9
 pback = 1013
-
+epsilon=1e-8
 
 class HollandWinds:
     """A Python class for generating winds with the symmetric Holland model
@@ -102,6 +102,7 @@ class HollandWinds:
         
         coors = [x for x in zip(lats,lons)]
         r = haversine_vector(coors, len(coors)*[(lat0, lon0)]) * 1000
+        r[r<epsilon] = epsilon
         # pressure deficit
         DP = (pback-pc)*100
         DP = max(DP, 100)

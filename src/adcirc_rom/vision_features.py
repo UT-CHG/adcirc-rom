@@ -3,10 +3,12 @@
 from feature_functions import HollandWinds
 import numpy as np
 import pandas as pd
+import h5py
 import glob
 from sklearn.neighbors import BallTree
 import pickle
 import os
+from global_land_mask import globe
 
 # TODO - directly process a packed input with multiple storms
 # TODO - add functions for visualization of gridded features
@@ -17,11 +19,33 @@ TRACK_DT = 3
 
 class StormData:
     
-    def __init__(self, track, landfall, maxel):
+    def __init__(self, track, landfall, zeta, zeta_time):
         self.track = track
-        self.landfall = landfall
-        self.zeta = maxel["zeta"]
-        self.zeta_time = maxel["zeta_time"]
+        self.landfall_row = landfall
+        self.zeta = zeta
+        self.zeta_time = zeta_time
+        self._precise_landfall()
+    
+    def _precise_landfall(self):
+        """Determine exact point and time where storm crosses land."""
+        
+        landfall_ind = int(min(4*8, self.landfall_row['tstep']))
+        prev_ind = landfall_ind - 1
+        track_lats, track_lons = self.track['lat'].values, self.track['lon'].values
+        lats = np.linspace(track_lats[prev_ind], track_lats[landfall_ind], 11)
+        lons = np.linspace(track_lons[prev_ind], track_lons[landfall_ind], 11)
+        lons[lons>180] -= 360
+        is_land = globe.is_land(lats, lons)
+        for i, land in enumerate(is_land):
+            if land:
+                self.landfall_lat = lats[i]
+                self.landfall_lon = lons[i]
+                self.landfall_time = landfall_ind - 1 + float(i)/(len(lats)-1)
+                return
+        print("no landfall according to global_land_mask")
+        self.landfall_lat = self.landfall_row['lat']
+        self.landfall_lon = self.landfall_row['lon']
+        self.landfall_time = landfall_ind
 
 def load_storms(indir):
     """Load a set of storms for processing."""
@@ -32,11 +56,13 @@ def load_storms(indir):
         dfs.append(pd.read_csv(f))
     
     maxel = np.load(f"{indir}/outputs/maxele.npz")
-    
+    zeta = maxel["zeta"][:]
+    zeta_time = maxel["zeta_time"][:]
+    zeta[zeta<0] = 0
     storms = []
     for i in range(len(dfs)):
         row = landfalls.iloc[i]
-        storms.append(StormData(dfs[i], row, maxel))
+        storms.append(StormData(dfs[i], row, zeta, zeta_time))
     return storms
         
 class VisionFeatures:
@@ -127,7 +153,11 @@ class VisionFeatures:
             if num_empty > 0:
                 means[empty_inds] = arr[query_inds]
             result[key] = means
-        
+            result[key+"_mesh"] = arr[inds]
+        result["mesh_inds_in_box"] = inds
+        result["box_lat_inds"] = lat_inds
+        result["box_lon_inds"] = lon_inds
+        result["empty_inds"] = empty_inds
         return result
         
         
@@ -135,8 +165,8 @@ class VisionFeatures:
         """Given a storm extract features."""
 
         # determine landfall spatiotemporal window
-        landfall_lat = storm.landfall.lat
-        landfall_lon = storm.landfall.lon
+        landfall_lat = storm.landfall_lat
+        landfall_lon = storm.landfall_lon
         if landfall_lon > 180: landfall_lon -= 360
         window = self._landfall_window
         res = self._spatial_points
@@ -146,7 +176,7 @@ class VisionFeatures:
 
         before, after = self._temporal_window
         hours = storm.track['tstep'].values*TRACK_DT
-        landfall_hour = storm.landfall.tstep*TRACK_DT
+        landfall_hour = storm.landfall_time*TRACK_DT
         
         hours = hours[(hours>=landfall_hour-before)&(hours<=landfall_hour+after)]
         if not len(hours):
@@ -175,32 +205,51 @@ class VisionFeatures:
             "windy": windy,
             "pres": pres,
             "lat": grid_lats,
-            "lon": grid_lons
+            "lon": grid_lons,
+            "landfall_hour": landfall_hour,
+            "landfall_lat": landfall_lat,
+            "landfall_lon": landfall_lon
         }
         
         arrs_to_interp = {
-            "bathy": bathy,
+            "bathy": self._bathy,
             "zeta": storm.zeta,
             "zeta_time": (storm.zeta_time/(24*3600) - landfall_hour/24-7)
         }
-        print("Landfall day", landfall_hour/24)
+        
         interpolated_arrs = self.do_interp(grid_lats, grid_lons, arrs_to_interp)
+        # squares that are land and have no mesh points should be
+        # assumed to be outside of the ADCIRC mesh, and values should be set to 
+        # a default instead of filled in with nearest neighbor interpolation
+        # this will fix the error where continents are marked with positive bathymetry
+        # and high zeta
+        is_land = globe.is_land(lats, lons)
+        empty_inds = interpolated_arrs["empty_inds"]
+        empty_is_land = is_land[empty_inds]
+        off_mesh_inds = np.where(empty_is_land)
+        box_off_mesh_inds = (empty_inds[0][off_mesh_inds], empty_inds[1][off_mesh_inds])
+        off_mesh_defaults = {
+            "bathy": -20,
+            "zeta": 0,
+            "zeta_time": -12
+        }
+        print(is_land, empty_is_land, off_mesh_inds)
+        for k, v in off_mesh_defaults.items():
+            interpolated_arrs[k][box_off_mesh_inds] = v
         data.update(interpolated_arrs)
-        print(data["zeta_time"].min(), data["zeta_time"].max())
-        print(data["zeta_time"])
         return data
 
-if __name__ == "__main__":
-    
-    import h5py
-    import pandas as pd
-    
-    basedir = "/work2/08009/bpachev/ls6/simulations/global-ml"
+def make_vision_features(basedir, **kwargs):    
     df = pd.read_csv(basedir+"/global_mesh_coords.csv", index_col=0)
     with h5py.File(basedir+"/global_bathy.hdf5") as ds:
         bathy = ds["depth"][:]
     
-    vf = VisionFeatures(bathy, df["lat"].values, df["lon"].values)
-    storms = load_storms(basedir+"/new_packed_inputs_normal/run00")
+    return VisionFeatures(bathy, df["lat"].values, df["lon"].values, **kwargs)
+    
+if __name__ == "__main__":
+    basedir = "/work2/08009/bpachev/ls6/simulations/global-ml"
+    vf = make_vision_features(basedir)
+    #storms = load_storms(basedir+"/new_packed_inputs_normal/run00")
+    storms = load_storms("/scratch1/08009/bpachev/global_tcs_v2/runs0_99/run0000/")
     for storm in storms:
         vf.process_storm(storm)

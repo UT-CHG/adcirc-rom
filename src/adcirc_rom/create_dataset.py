@@ -85,7 +85,7 @@ class Dataset:
         trk = pd.read_csv(track_file)
         
         holland = HollandWinds(trk)
-        times = np.arange(0, len(trk))
+        times = np.arange(0, len(trk)) * 3
         lats, lons = self.lats[inds], self.lons[inds]
         # we only need a padding of 1 degree around the window for computations
         mask = (np.abs(lats-lat_fall) <= self.window + 1) & (np.abs(lons-lon_fall) <= self.window+1)
