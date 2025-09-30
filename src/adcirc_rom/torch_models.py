@@ -101,3 +101,12 @@ class SimpleFTTransformer(nn.Module):
         x = x.reshape(x.size(0), -1)
         out = self.head(x)
         return out
+
+class VisionNet(nn.Module):
+    
+    def __init__(self,
+                 input_channels,
+                 hidden_layers)
+    
+        super().__init__()
+        
