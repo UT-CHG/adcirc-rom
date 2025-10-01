@@ -168,28 +168,33 @@ class VisionFeatures:
         landfall_lat = storm.landfall_lat
         landfall_lon = storm.landfall_lon
         if landfall_lon > 180: landfall_lon -= 360
+        if landfall_lon < -180: landfall_lon += 360
         window = self._landfall_window
         res = self._spatial_points
         grid_lats = np.linspace(landfall_lat-window, landfall_lat+window, res)
         grid_lons = np.linspace(landfall_lon-window, landfall_lon+window, res)
+        # handle wrap-around
+        grid_lons[grid_lons >= 180] -= 360
+        grid_lons[grid_lons <= -180] += 360
         lons, lats = np.meshgrid(grid_lons, grid_lats)
 
         before, after = self._temporal_window
         hours = storm.track['tstep'].values*TRACK_DT
         landfall_hour = storm.landfall_time*TRACK_DT
         
-        hours = hours[(hours>=landfall_hour-before)&(hours<=landfall_hour+after)]
+        start_time = landfall_hour - before
+        stop_time = landfall_hour + after
+        hours = hours[(hours>=start_time)&(hours<=stop_time)]
         if not len(hours):
             print("WARNING: no valid times in landfall window!")
             return
 
-        start_time, stop_time = hours[0], hours[-1]
-        if start_time >= stop_time:
+        if hours[0] >= hours[-1]:
             print("WARNING: start time in landfall window not less than end time!")
             return
         
         num_times = int((stop_time-start_time)/self._dt) + 1
-        times = np.linspace(start_time, start_time, num_times)
+        times = np.linspace(start_time, stop_time, num_times)
         
         # compute gridded winds and pressure
         
@@ -233,7 +238,6 @@ class VisionFeatures:
             "zeta": 0,
             "zeta_time": -12
         }
-        print(is_land, empty_is_land, off_mesh_inds)
         for k, v in off_mesh_defaults.items():
             interpolated_arrs[k][box_off_mesh_inds] = v
         data.update(interpolated_arrs)
@@ -245,11 +249,38 @@ def make_vision_features(basedir, **kwargs):
         bathy = ds["depth"][:]
     
     return VisionFeatures(bathy, df["lat"].values, df["lon"].values, **kwargs)
-    
+
+def create_dataset(runsdir, outputdir, basedir="/work2/08009/bpachev/ls6/simulations/global-ml", **kwargs):
+    """Process a set of ADCIRC runs and create a gridded dataset."""
+
+    rundirs = sorted(list(glob.glob(runsdir+"/*/")))
+    os.makedirs(outputdir, exist_ok=True)
+    vf = make_vision_features(basedir, **kwargs)
+
+    from mpi4py import MPI
+    rank = MPI.COMM_WORLD.rank
+    size = MPI.COMM_WORLD.size
+
+    if rank == 0: print(f"Processing {len(rundirs)} ADCIRC runs")
+    for rundir in rundirs[rank::size]:
+        print(rundir)
+        storms = load_storms(rundir)
+        for i, storm in enumerate(storms):
+            data = vf.process_storm(storm)
+            outfname = outputdir + "/" + rundir.strip("/").split("/")[-1] + f"_{i}.hdf5"
+            with h5py.File(outfname, "w") as ds:
+                for k, arr in data.items():
+                    ds[k] = arr
+
+
 if __name__ == "__main__":
+    """
     basedir = "/work2/08009/bpachev/ls6/simulations/global-ml"
     vf = make_vision_features(basedir)
     #storms = load_storms(basedir+"/new_packed_inputs_normal/run00")
     storms = load_storms("/scratch1/08009/bpachev/global_tcs_v2/runs0_99/run0000/")
     for storm in storms:
         vf.process_storm(storm)
+    """
+
+    create_dataset("/scratch/08009/bpachev/global_tcs_v2/", "/scratch/08009/bpachev/global_tcs_datasets/test")

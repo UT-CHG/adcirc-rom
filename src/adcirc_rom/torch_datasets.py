@@ -48,15 +48,20 @@ class SyntheticTCDataset(Dataset):
         """
         return len(self.files)
 
-    def __getitem__(self, idx):
-        """Access an item at a given index
-        """
+    def _get_fname(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
             if len(idx) > 1: raise RuntimeWarning("Unable to handle idx of length > 1")
             idx = idx[0]
 
-        fname = self.files[idx]
+        return self.files[idx]
+
+
+    def __getitem__(self, idx):
+        """Access an item at a given index
+        """
+        
+        fname = self._get_fname(idx)
         
         top_features = ['bathy_mean_0.05', 'bathy', 'max_pres_min_0.4', 'min_windy_min_0.05', 
             'mean_winds_mean_0.1', 'min_winds_mean_0.1', 'mean_windx_max_0.4', 'bathy_max_0.05', 
@@ -98,6 +103,25 @@ class SyntheticTCDataset(Dataset):
                 'zeta_max': torch.Tensor(zeta_filtered),
                 'features': torch.Tensor(mat)
             }
+
+class VisionTCDataset(SyntheticTCDataset):
+    """Dataset appropriate for use with CNN"""
+
+    def __getitem__(self, idx):
+        """Load data for a storm into memory"""
+
+        fname = self._get_fname(idx)
+
+        with h5py.File(fname, 'r') as ds:
+            zeta = ds["zeta"][:]
+            bathy = ds["bathy"][:]
+            windx = ds["windx"][:]
+            windy = ds["windy"][:]
+            pres = ds["pres"][:]
+
+            return torch.Tensor(zeta), torch.Tensor(np.concatenate([bathy[np.newaxis, ...], windx, windy, pres], axis=0)) 
+
+
 
 def tc_collate_fn(samples):
     """Collate a list of samples

@@ -15,10 +15,11 @@ except:
 
 from torch import nn, optim
 from torch.utils import data
-from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer
-from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn
+from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer, VisionNet
+from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn, VisionTCDataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import tqdm
 import time
 import wandb
 
@@ -35,7 +36,7 @@ def parse_args():
     parser.add_argument('--gpu', default=None, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, help='start epoch number (useful on restarts)')
     parser.add_argument('--epochs', default=500, type=int, help='number of total epochs to run')
-    parser.add_argument('--datadir', default="/scratch/06307/clos21/public/prateek-updated/Texas")
+    parser.add_argument('--datadir', default="/scratch/08009/bpachev/global_tcs_datasets/test")
     #parser.add_argument('--datadir', default="/scratch/06307/clos21/public/prateek-updated/v3-new/NA")
     parser.add_argument('--workers', default=8, type=int, help="Num workers for dataloader")
     parser.add_argument('--save_dir', default='./trained_model', type=str, help='directory to save checkpoints and final model')
@@ -67,7 +68,7 @@ def main(args):
         size = int(os.environ["SLURM_NTASKS"])
 
     args.world_size = size
-    args.distributed = args.world_size > 1
+    #args.distributed = args.world_size > 1
     ngpus_per_node = torch.cuda.device_count()
 
     os.environ['MASTER_PORT'] = "55667"
@@ -75,12 +76,12 @@ def main(args):
     master_addr = subprocess.check_output(f'scontrol show hostnames "{nodelist}" | head -n 1', shell=True)
     master_addr = master_addr.decode().strip()
     print("Setting master_addr to ", master_addr, "on rank", rank)
+    print("world size", size)
     os.environ['MASTER_ADDR'] = master_addr
 
-    if args.distributed:
-        args.rank = rank
-        args.gpu = args.rank % ngpus_per_node
-        dist.init_process_group("nccl", world_size=args.world_size, rank=args.rank)
+    args.rank = rank
+    args.gpu = args.rank % ngpus_per_node
+    dist.init_process_group("nccl", world_size=args.world_size, rank=args.rank)
 
     # suppress printing if not on master gpu
     if args.rank != 0:
@@ -93,8 +94,14 @@ def main(args):
     
     ### model ###
     # ANN
-    model = FeedForwardNet(80)
-    
+    if args.net == 'feedforward':
+        model = FeedForwardNet(80)
+        dataset_class = SyntheticTCDataset
+        collate_fn = tc_collate_fn
+    elif args.net == 'vision':
+        model = VisionNet(input_channels=40, hidden_layers=4)
+        dataset_class = VisionTCDataset
+        collate_fn = None
     # FTT
     #model = SimpleFTTransformer(
     #    n_features=161,   # same as your input_dim
@@ -106,7 +113,7 @@ def main(args):
     #)
 
 
-    if args.distributed:
+    if True:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
@@ -128,17 +135,17 @@ def main(args):
     scheduler = CosineAnnealingLR(optimizer, T_max=10) # add this to adjustable learning rate
     
     ### data loading ###
-    train_dataset = SyntheticTCDataset(args.datadir, seed=args.seed)
-    val_dataset = SyntheticTCDataset(args.datadir, val=True, seed=args.seed)
-    test_dataset = SyntheticTCDataset(args.datadir, test=True, seed=args.seed)
+    train_dataset = dataset_class(args.datadir, seed=args.seed)
+    val_dataset = dataset_class(args.datadir, val=True, seed=args.seed)
+    test_dataset = dataset_class(args.datadir, test=True, seed=args.seed)
 
 
     train_sampler = data.distributed.DistributedSampler(train_dataset, shuffle=True)
     val_sampler = data.distributed.DistributedSampler(val_dataset, shuffle=False) 
 
-    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=train_sampler, collate_fn=tc_collate_fn, drop_last=True)
-    val_loader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, collate_fn=tc_collate_fn, drop_last=True)
-    test_loader = data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, collate_fn=tc_collate_fn, drop_last=True)
+    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=train_sampler, collate_fn=collate_fn, drop_last=True)
+    val_loader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, collate_fn=collate_fn, drop_last=True)
+    test_loader = data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
 
 
     torch.backends.cudnn.benchmark = True
@@ -148,15 +155,15 @@ def main(args):
     # log file
     if args.rank == 0:
         log_file = open(os.path.join(args.save_dir, 'training_log.txt'), 'w')
-        wandb.init(project="dev_feedforward", config=vars(args))
+        wandb.init(project=f"dev_{args.net}", config=vars(args))
 
     # Training and validation loop
     for epoch in range(args.start_epoch, args.epochs):
         np.random.seed(epoch)
         random.seed(epoch)
-        if args.distributed and isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+        if isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
-        if args.distributed and isinstance(val_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+        if isinstance(val_loader.sampler, torch.utils.data.distributed.DistributedSampler):
             val_loader.sampler.set_epoch(epoch)
 
 
@@ -199,7 +206,7 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
     """
     model.train()
     epoch_loss = 0.0
-    for i, (target, features) in enumerate(train_loader):
+    for i, (target, features) in enumerate(tqdm(train_loader)):
         target = target.unsqueeze(1)  
         features, target = features.cuda(args.gpu), target.cuda(args.gpu)
         model.zero_grad()
@@ -211,7 +218,6 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
         optimizer.step()
         with torch.no_grad(): 
             epoch_loss += err.item()  
-        print(err.item())
 
         if i % 50 == 0:
             torch.cuda.empty_cache()
@@ -228,6 +234,9 @@ def validate(val_loader, model, criterion, epoch, args):
     """
     model.eval()
     val_loss = 0.0
+    if not len(val_loader):
+        print("Not enough data to have a validation set!")
+        return val_loss
     with torch.no_grad():
         for target, features in val_loader:
             target = target.unsqueeze(1)  

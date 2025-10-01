@@ -136,7 +136,7 @@ class HollandWinds:
         windx, windy, pres = np.zeros(flatshape), np.zeros(flatshape), np.full(flatshape, pback)
         for i, t in enumerate(times):
             windx[i], windy[i], pres[i] = self.evaluate(t, flat_lats, flat_lons)
-        return windx.reshape(flatshape), windy.reshape(flatshape), pres.reshape(flatshape)
+        return windx.reshape(outshape), windy.reshape(outshape), pres.reshape(outshape)
     
 class GridEncoder:
     """A class to represent spatial aggregations of mesh variables like bathymetry, wind, pressure, etc."""

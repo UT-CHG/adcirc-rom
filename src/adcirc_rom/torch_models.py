@@ -106,7 +106,26 @@ class VisionNet(nn.Module):
     
     def __init__(self,
                  input_channels,
-                 hidden_layers)
+                 hidden_layers,
+                 hidden_channels=32,
+                 kernel_size=3
+                 ):
     
         super().__init__()
-        
+       
+        self.layers = []
+
+        for i in range(hidden_layers):
+            layer_in_channels = input_channels if not i else hidden_channels
+            self.layers.append(nn.Conv2d(layer_in_channels, hidden_channels, kernel_size=kernel_size, padding=int(kernel_size/2)))
+            self.layers.append(nn.BatchNorm2d(hidden_channels))
+            self.layers.append(nn.LeakyReLU())
+
+        self._encoder = nn.Sequential(*self.layers)
+        #self.classifier = nn.Conv2d(hidden_channels, 2, kernel_size=1)
+        self.regressor = nn.Conv2d(hidden_channels, 1, kernel_size=1)
+
+    def forward(self, x):
+        x = self._encoder(x)
+        #return self.classifier(x), F.relu(self.regressor(x))
+        return F.relu(self.regressor(x))
