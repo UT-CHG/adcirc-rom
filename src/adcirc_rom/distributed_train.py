@@ -15,7 +15,7 @@ except:
 
 from torch import nn, optim
 from torch.utils import data
-from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer, VisionNet
+from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer, VisionNet, UNet4
 from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn, VisionTCDataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -99,9 +99,16 @@ def main(args):
         dataset_class = SyntheticTCDataset
         collate_fn = tc_collate_fn
     elif args.net == 'vision':
-        model = VisionNet(input_channels=40, hidden_layers=4)
+        num_channels = VisionTCDataset(args.datadir).num_channels()
+        model = VisionNet(input_channels=num_channels, hidden_layers=6, hidden_channels=64)
         dataset_class = VisionTCDataset
         collate_fn = None
+    elif args.net == 'unet':
+        num_channels = VisionTCDataset(args.datadir).num_channels()
+        model = UNet4(in_channels=num_channels)
+        dataset_class = VisionTCDataset
+        collate_fn = None
+
     # FTT
     #model = SimpleFTTransformer(
     #    n_features=161,   # same as your input_dim
@@ -154,6 +161,7 @@ def main(args):
 
     # log file
     if args.rank == 0:
+        os.environ["WANDB_MODE"] = "offline"
         log_file = open(os.path.join(args.save_dir, 'training_log.txt'), 'w')
         wandb.init(project=f"dev_{args.net}", config=vars(args))
 
@@ -190,6 +198,7 @@ def main(args):
         print("Running test evaluation")
         test_loss = test(test_loader, model, criterion, args)
         print(f'Test Loss: {test_loss}')
+        save_test_preds(test_dataset, model, args.save_dir+"/pred")
         if args.rank == 0:
             log_file.write(f"Test Loss: {test_loss}\n")
             wandb.log({"test_loss": test_loss})
@@ -249,6 +258,20 @@ def validate(val_loader, model, criterion, epoch, args):
     print(f"Epoch {epoch} - Validation Loss: {val_loss}")
     torch.cuda.empty_cache()  
     return val_loss  
+
+def save_test_preds(test_dataset, model, save_dir):
+    model.eval()
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    print("saving test preds")
+    with torch.no_grad():
+        for i in tqdm(range(len(test_dataset))):
+            target, features = test_dataset[i]
+            features = features.unsqueeze(0)
+            features = features.cuda()
+            preds = model(features)
+            test_dataset.save_pred(i, preds.cpu(), target, save_dir)
+
 
 def test(test_loader, model, criterion, args):
     """Test model

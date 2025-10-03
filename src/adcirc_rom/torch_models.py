@@ -126,6 +126,85 @@ class VisionNet(nn.Module):
         self.regressor = nn.Conv2d(hidden_channels, 1, kernel_size=1)
 
     def forward(self, x):
+        # filter out land from sea
+        sea_mask = (x[:,0,...] > -10).unsqueeze(1)
         x = self._encoder(x)
+        pred = F.relu(self.regressor(x))
+        return pred * sea_mask
         #return self.classifier(x), F.relu(self.regressor(x))
-        return F.relu(self.regressor(x))
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DoubleConv(nn.Module):
+    """(Conv => BN => ReLU) * 2"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+class UNet4(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int = 1, base_channels: int = 64):
+        super().__init__()
+        # Encoder
+        self.enc1 = DoubleConv(in_channels, base_channels)
+        self.enc2 = DoubleConv(base_channels, base_channels * 2)
+        self.enc3 = DoubleConv(base_channels * 2, base_channels * 4)
+        self.enc4 = DoubleConv(base_channels * 4, base_channels * 8)
+
+        # Bottleneck
+        self.bottleneck = DoubleConv(base_channels * 8, base_channels * 16)
+
+        # Decoder
+        self.up4 = nn.ConvTranspose2d(base_channels * 16, base_channels * 8, kernel_size=2, stride=2)
+        self.dec4 = DoubleConv(base_channels * 16, base_channels * 8)
+
+        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=2, stride=2)
+        self.dec3 = DoubleConv(base_channels * 8, base_channels * 4)
+
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(base_channels * 4, base_channels * 2)
+
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(base_channels * 2, base_channels)
+
+        # Output layer
+        self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        # filter out land from sea
+        sea_mask = (x[:,0,...] > -10).unsqueeze(1)
+        x1 = self.enc1(x)
+        x2 = self.enc2(F.max_pool2d(x1, 2))
+        x3 = self.enc3(F.max_pool2d(x2, 2))
+        x4 = self.enc4(F.max_pool2d(x3, 2))
+
+        # Bottleneck
+        b = self.bottleneck(F.max_pool2d(x4, 2))
+
+        # Decoder
+        d4 = self.up4(b)
+        d4 = self.dec4(torch.cat([d4, x4], dim=1))
+
+        d3 = self.up3(d4)
+        d3 = self.dec3(torch.cat([d3, x3], dim=1))
+
+        d2 = self.up2(d3)
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))
+
+        return F.relu(self.out_conv(d1)) * sea_mask
+

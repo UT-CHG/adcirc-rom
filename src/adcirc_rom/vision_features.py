@@ -74,9 +74,10 @@ class VisionFeatures:
         bathy,
         lats,
         lons,
+        harmonics=None,
         landfall_window = 2.5, # window in degrees about landfall
         temporal_window = [24, 12], # hours before and after
-        spatial_res = .02, # resolution in degrees
+        spatial_points = 256, # resolution in degrees
         temporal_res = 3, # resolution in hours
         treepath = "mesh_tree.pkl" # path to BallTree of mesh coords
     ):
@@ -85,11 +86,11 @@ class VisionFeatures:
         self._lats = lats
         self._lons = lons
         self._dt = temporal_res
-        self._dx = spatial_res
+        self._dx = 2*landfall_window / (spatial_points-1)
         self._landfall_window = landfall_window
         self._temporal_window = temporal_window
-        self._spatial_points = int(2*landfall_window/spatial_res) + 1
-
+        self._spatial_points = spatial_points
+        self._harmonics = harmonics
         self._init_tree(treepath)
     
     def _init_tree(self, treepath):
@@ -221,6 +222,9 @@ class VisionFeatures:
             "zeta": storm.zeta,
             "zeta_time": (storm.zeta_time/(24*3600) - landfall_hour/24-7)
         }
+
+        if self._harmonics is not None:
+            arrs_to_interp.update(self._harmonics)
         
         interpolated_arrs = self.do_interp(grid_lats, grid_lons, arrs_to_interp)
         # squares that are land and have no mesh points should be
@@ -247,8 +251,14 @@ def make_vision_features(basedir, **kwargs):
     df = pd.read_csv(basedir+"/global_mesh_coords.csv", index_col=0)
     with h5py.File(basedir+"/global_bathy.hdf5") as ds:
         bathy = ds["depth"][:]
-    
-    return VisionFeatures(bathy, df["lat"].values, df["lon"].values, **kwargs)
+
+    harmonics_arrs = None
+    #harmonics_arrs = {}
+    #with h5py.File(basedir+"/global_tidal_amplitudes.hdf5", "r") as harmonics:
+    #    for k in sorted(list(harmonics.keys())):
+    #        harmonics_arrs[k] = harmonics[k][:]
+
+    return VisionFeatures(bathy, df["lat"].values, df["lon"].values, harmonics=harmonics_arrs, **kwargs)
 
 def create_dataset(runsdir, outputdir, basedir="/work2/08009/bpachev/ls6/simulations/global-ml", **kwargs):
     """Process a set of ADCIRC runs and create a gridded dataset."""
@@ -283,4 +293,9 @@ if __name__ == "__main__":
         vf.process_storm(storm)
     """
 
-    create_dataset("/scratch/08009/bpachev/global_tcs_v2/", "/scratch/08009/bpachev/global_tcs_datasets/test")
+    create_dataset(
+            "/scratch/08009/bpachev/global_tcs_v2/",
+            "/scratch/08009/bpachev/global_tcs_datasets/test_aligned",
+            landfall_window=2.5,
+            spatial_points=256
+    )
