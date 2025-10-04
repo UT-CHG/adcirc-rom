@@ -99,10 +99,25 @@ class SyntheticTCDataset(Dataset):
             for i, k in enumerate(keys):
                 mat[:, i] = ds[k][:][valid_indices] 
 
-            return {
-                'zeta_max': torch.Tensor(zeta_filtered),
-                'features': torch.Tensor(mat)
-            }
+            return {'zeta_max': torch.Tensor(zeta_filtered), 'features': torch.Tensor(mat)}
+
+    def save_pred(self, idx, preds, target, save_dir):
+        """Save a prediction to an output directory."""
+
+        fname = self._get_fname(idx)
+
+        runname = fname.split("/")[-1].split(".")[0]
+        outname = save_dir+f"/{runname}_pred.hdf5"
+        with h5py.File(outname, "w") as ds:
+            if type(target) is dict:
+                ds["zeta_true"] = target["zeta"].cpu().numpy()
+                ds["zeta_mask"] = target["zeta_mask"].cpu().numpy()
+                ds["zeta_pred"] = preds["zeta"].cpu().numpy()
+                ds["zeta_pred_mask"] = preds["zeta_mask"].cpu().numpy()
+            else:
+                ds["zeta_true"] = target.cpu().numpy()
+                ds["zeta_pred"] = preds.cpu().numpy()
+
 
 class VisionTCDataset(SyntheticTCDataset):
     """Dataset appropriate for use with CNN"""
@@ -119,9 +134,23 @@ class VisionTCDataset(SyntheticTCDataset):
             windy = ds["windy"][:]
             pres = ds["pres"][:]
 
-            return torch.Tensor(zeta), torch.Tensor(np.concatenate([bathy[np.newaxis, ...], windx, windy, pres], axis=0)) 
+            arrs = [bathy[np.newaxis, ...], windx, windy, pres]
+            for k in sorted(list(ds.keys())):
+                if k.endswith("amplitude"):
+                    arrs.append(ds[k][:][np.newaxis, ...])
 
+            if "zeta_mask" in ds.keys():
+                arrs.append(ds["land_mask"][:][np.newaxis, ...])
+                arrs.append(ds["coastal_mask"][:][np.newaxis, ...])
+                return {
+                    "zeta": torch.Tensor(zeta),
+                    "zeta_mask": torch.Tensor(ds["zeta_mask"][:])}, torch.Tensor(np.concatenate(arrs, axis=0))
+            else:
+                return torch.Tensor(zeta), torch.Tensor(np.concatenate(arrs, axis=0)) 
 
+    def num_channels(self):
+        _, feats = self[0]
+        return feats.shape[0]
 
 def tc_collate_fn(samples):
     """Collate a list of samples
@@ -133,3 +162,14 @@ def tc_collate_fn(samples):
         features.append(s['features'])
 
     return torch.cat(zetas), torch.cat(features)
+    
+def segment_collate_fn(samples):
+    zetas = []
+    zeta_masks = []
+    features = []
+    for s, f in samples:
+        zetas.append(s["zeta"])
+        zeta_masks.append(s["zeta_mask"])
+        features.append(f)
+
+    return {"zeta": torch.stack(zetas), "zeta_mask": torch.stack(zeta_masks)}, torch.stack(features)

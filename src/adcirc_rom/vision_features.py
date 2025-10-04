@@ -9,10 +9,9 @@ from sklearn.neighbors import BallTree
 import pickle
 import os
 from global_land_mask import globe
+from constants import earth_radius
 
-# TODO - directly process a packed input with multiple storms
 # TODO - add functions for visualization of gridded features
-# TODO - get gridded winds/bathymetry/pressure time series as direct inputs
 # TODO - analyze time of zeta max (relative to time of landfall)
 # TODO - get bathymetry gradients
 TRACK_DT = 3
@@ -42,7 +41,7 @@ class StormData:
                 self.landfall_lon = lons[i]
                 self.landfall_time = landfall_ind - 1 + float(i)/(len(lats)-1)
                 return
-        print("no landfall according to global_land_mask")
+        #print("no landfall according to global_land_mask")
         self.landfall_lat = self.landfall_row['lat']
         self.landfall_lon = self.landfall_row['lon']
         self.landfall_time = landfall_ind
@@ -64,7 +63,13 @@ def load_storms(indir):
         row = landfalls.iloc[i]
         storms.append(StormData(dfs[i], row, zeta, zeta_time))
     return storms
-        
+
+def latlon_tree(lats, lons):
+    return BallTree(latlon_tree_points(lats, lons), metric='haversine')
+
+def latlon_tree_points(lats, lons):
+    return np.deg2rad(np.column_stack([lats, lons]))
+
 class VisionFeatures:
     """Class to create gridded feature maps suitable for use in vision models."""
 
@@ -75,10 +80,14 @@ class VisionFeatures:
         lats,
         lons,
         harmonics=None,
-        landfall_window = 2.5, # window in degrees about landfall
+        landfall_window = 1.25, # window in degrees about landfall
         temporal_window = [24, 12], # hours before and after
-        spatial_points = 256, # resolution in degrees
+        spatial_points = 128, # resolution in degrees
         temporal_res = 3, # resolution in hours
+        segment=True, # whether to segment the data
+        segment_zeta_rel_thresh=.8, # threshold as ratio of maximum zeta
+        segment_zeta_abs_thresh=2.5, # threshold in absolute terms
+        segment_land_dist=10, # max dist in km from land for segment
         treepath = "mesh_tree.pkl" # path to BallTree of mesh coords
     ):
         """Initialize class."""
@@ -91,13 +100,18 @@ class VisionFeatures:
         self._temporal_window = temporal_window
         self._spatial_points = spatial_points
         self._harmonics = harmonics
+        self._segment_zeta_rel_thresh = segment_zeta_rel_thresh
+        self._segment = segment
+        self._segment_zeta_abs_thresh = segment_zeta_abs_thresh
+        self._segment_land_dist = segment_land_dist
         self._init_tree(treepath)
     
     def _init_tree(self, treepath):
         if not os.path.exists(treepath):
             # need the file with mesh coordinates and station coordinates
-            coords = np.deg2rad(np.column_stack([self._lats, self._lons]))
-            tree = BallTree(coords, metric='haversine')
+            tree = latlon_tree(self._lats, self._lons)
+            #coords = np.deg2rad(np.column_stack([self._lats, self._lons]))
+            #tree = BallTree(coords, metric='haversine')
             with open(treepath, "wb") as fp: pickle.dump(tree, fp)
             self._tree = tree
         else:
@@ -137,11 +151,7 @@ class VisionFeatures:
         empty_inds = np.where(empty)
         num_empty = len(empty_inds[0])
         if num_empty > 0:
-            query_points = np.deg2rad(
-                np.column_stack(
-                    [lats[empty_inds[0]], lons[empty_inds[1]]]
-                )
-            )
+            query_points = latlon_tree_points(lats[empty_inds[0]], lons[empty_inds[1]])
             query_inds = self._tree.query(query_points, k=1, return_distance=False)
             query_inds = query_inds.flatten()
         # avoid divide by zero
@@ -232,7 +242,8 @@ class VisionFeatures:
         # a default instead of filled in with nearest neighbor interpolation
         # this will fix the error where continents are marked with positive bathymetry
         # and high zeta
-        is_land = globe.is_land(lats, lons)
+        is_land = self._filtered_land_mask(lats, lons)
+        # the global land mask is pretty fine-grained
         empty_inds = interpolated_arrs["empty_inds"]
         empty_is_land = is_land[empty_inds]
         off_mesh_inds = np.where(empty_is_land)
@@ -245,7 +256,56 @@ class VisionFeatures:
         for k, v in off_mesh_defaults.items():
             interpolated_arrs[k][box_off_mesh_inds] = v
         data.update(interpolated_arrs)
+        data["land_mask"] = is_land
+        if self._segment:
+            self.add_segmentation(data, is_land)
+
         return data
+
+    def _filtered_land_mask(self, lats, lons):
+        """Filter the raw land mask to cut down on tiny one-pixel islands."""
+
+        land_mask = globe.is_land(lats, lons)
+
+        neighbors = np.zeros(land_mask.shape)
+        neighbors[:-1] += land_mask[1:]
+        neighbors[1:] += land_mask[:-1]
+        neighbors[:, 1:] += land_mask[:, :-1]
+        neighbors[:, :-1] += land_mask[:, 1:]        
+        return land_mask & (neighbors >= 2)
+        
+    def add_segmentation(self, data, is_land):
+        """Add segmentation masks to the data."""
+
+        # step 1 - determine distance to land for each grid cell
+        land_inds = np.where(is_land)
+        if not len(land_inds[0]):
+            print("Empty land mask!")
+            raise ValueError()
+        land_lats = data["lat"][land_inds[0]]
+        land_lons = data["lon"][land_inds[1]]
+        tree = latlon_tree(land_lats, land_lons)
+        # include points marked as land by global_land_mask but
+        # still inundated - these likely correspond to differences in ADCIRC's mesh
+        # and the global land mask
+        sea_mask = ~is_land | (data["zeta"] > 0)
+        sea_inds = np.where(sea_mask)
+        sea_query_points = latlon_tree_points(data["lat"][sea_inds[0]], data["lon"][sea_inds[1]])
+        land_dist, _ = tree.query(sea_query_points, k=1, return_distance=True)
+        land_dist = earth_radius * land_dist.flatten()
+        coastal_inds = np.where(land_dist < self._segment_land_dist)
+
+        coastal_mask = np.zeros_like(sea_mask)
+        coastal_mask[sea_inds[0][coastal_inds], sea_inds[1][coastal_inds]] = True
+
+        data["coastal_mask"] = coastal_mask
+
+        # step 2, apply zeta mask on top of coastal mask
+        max_zeta = data["zeta"][coastal_mask].max()
+        zeta_rel_thresh = max_zeta * self._segment_zeta_rel_thresh
+        thresh = min(zeta_rel_thresh, self._segment_zeta_abs_thresh)
+        data["zeta_mask"] = (data["zeta"] > thresh) & coastal_mask
+
 
 def make_vision_features(basedir, **kwargs):    
     df = pd.read_csv(basedir+"/global_mesh_coords.csv", index_col=0)
@@ -273,10 +333,13 @@ def create_dataset(runsdir, outputdir, basedir="/work2/08009/bpachev/ls6/simulat
 
     if rank == 0: print(f"Processing {len(rundirs)} ADCIRC runs")
     for rundir in rundirs[rank::size]:
-        print(rundir)
+        #print(rundir)
         storms = load_storms(rundir)
         for i, storm in enumerate(storms):
-            data = vf.process_storm(storm)
+            try:
+                data = vf.process_storm(storm)
+            except ValueError:
+                continue
             outfname = outputdir + "/" + rundir.strip("/").split("/")[-1] + f"_{i}.hdf5"
             with h5py.File(outfname, "w") as ds:
                 for k, arr in data.items():
@@ -295,7 +358,5 @@ if __name__ == "__main__":
 
     create_dataset(
             "/scratch/08009/bpachev/global_tcs_v2/",
-            "/scratch/08009/bpachev/global_tcs_datasets/test_aligned",
-            landfall_window=2.5,
-            spatial_points=256
+            "/scratch/08009/bpachev/global_tcs_datasets/test_segmented",
     )

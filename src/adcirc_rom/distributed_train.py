@@ -15,8 +15,8 @@ except:
 
 from torch import nn, optim
 from torch.utils import data
-from adcirc_rom.torch_models import FeedForwardNet, SimpleFTTransformer, VisionNet, UNet4
-from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn, VisionTCDataset
+import adcirc_rom.torch_models as models
+from adcirc_rom.torch_datasets import SyntheticTCDataset, tc_collate_fn, segment_collate_fn, VisionTCDataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument('--dist-url', default='env://', type=str, help='url used to set up distributed training')
     parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
     parser.add_argument('--local_rank', default=-1, type=int, help='local rank for distributed training')
+    parser.add_argument("--segment", action="store_true", help="Train with segmented objective.")
     args = parser.parse_args()
     return args
 
@@ -95,19 +96,28 @@ def main(args):
     ### model ###
     # ANN
     if args.net == 'feedforward':
-        model = FeedForwardNet(80)
+        model = models.FeedForwardNet(80)
         dataset_class = SyntheticTCDataset
-        collate_fn = tc_collate_fn
+        collate_fn = models.tc_collate_fn
     elif args.net == 'vision':
         num_channels = VisionTCDataset(args.datadir).num_channels()
-        model = VisionNet(input_channels=num_channels, hidden_layers=6, hidden_channels=64)
+        model = models.VisionNet(input_channels=num_channels, hidden_layers=6, hidden_channels=64)
         dataset_class = VisionTCDataset
         collate_fn = None
     elif args.net == 'unet':
         num_channels = VisionTCDataset(args.datadir).num_channels()
-        model = UNet4(in_channels=num_channels)
         dataset_class = VisionTCDataset
-        collate_fn = None
+        if args.segment:
+            model = models.SegmentationUNet2(in_channels=num_channels)
+            collate_fn = segment_collate_fn
+        else:
+            model = models.UNet4(in_channels=num_channels)
+            collate_fn = None
+
+    if args.segment:
+        criterion = models.SegmentedLoss(positive_weight=.9, regression_weight=.1)
+    else:
+        criterion = nn.MSELoss()
 
     # FTT
     #model = SimpleFTTransformer(
@@ -156,7 +166,6 @@ def main(args):
 
 
     torch.backends.cudnn.benchmark = True
-    criterion = nn.MSELoss()
 
 
     # log file
@@ -216,11 +225,19 @@ def train_one_epoch(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
     epoch_loss = 0.0
     for i, (target, features) in enumerate(tqdm(train_loader)):
-        target = target.unsqueeze(1)  
-        features, target = features.cuda(args.gpu), target.cuda(args.gpu)
+        if args.segment:
+            features = features.cuda(args.gpu)
+            target = {k: target[k].cuda(args.gpu).unsqueeze(1) for k in target}            
+        else:
+            target = target.unsqueeze(1)
+            features, target = features.cuda(args.gpu), target.cuda(args.gpu)
+
         model.zero_grad()
         preds = model(features)
-        err = criterion(preds, target).sqrt()
+        # TODO is sqrt appropiate here?
+        #err = criterion(preds, target).sqrt()
+        err = criterion(preds, target)
+    
         err.backward()
         # grad clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -248,10 +265,14 @@ def validate(val_loader, model, criterion, epoch, args):
         return val_loss
     with torch.no_grad():
         for target, features in val_loader:
-            target = target.unsqueeze(1)  
-            features, target = features.cuda(args.gpu), target.cuda(args.gpu)
+            if args.segment:
+                features = features.cuda(args.gpu)
+                target = {k: target[k].cuda(args.gpu).unsqueeze(1) for k in target}            
+            else:
+                target = target.unsqueeze(1)
+                features, target = features.cuda(args.gpu), target.cuda(args.gpu)
             preds = model(features)
-            err = criterion(preds, target).sqrt()
+            err = criterion(preds, target)
             val_loss += err.item()
 
     val_loss /= len(val_loader)
@@ -270,7 +291,7 @@ def save_test_preds(test_dataset, model, save_dir):
             features = features.unsqueeze(0)
             features = features.cuda()
             preds = model(features)
-            test_dataset.save_pred(i, preds.cpu(), target, save_dir)
+            test_dataset.save_pred(i, preds, target, save_dir)
 
 
 def test(test_loader, model, criterion, args):
@@ -281,10 +302,14 @@ def test(test_loader, model, criterion, args):
     test_loss = 0.0
     with torch.no_grad():
         for target, features in test_loader:
-            target = target.unsqueeze(1)  
-            features, target = features.cuda(args.gpu), target.cuda(args.gpu)
+            if args.segment:
+                features = features.cuda(args.gpu)
+                target = {k: target[k].cuda(args.gpu).unsqueeze(1) for k in target}            
+            else:
+                target = target.unsqueeze(1)
+                features, target = features.cuda(args.gpu), target.cuda(args.gpu)
             preds = model(features)
-            err = criterion(preds, target).sqrt()
+            err = criterion(preds, target)
             test_loss += err.item()
 
     test_loss /= len(test_loader)

@@ -208,3 +208,68 @@ class UNet4(nn.Module):
 
         return F.relu(self.out_conv(d1)) * sea_mask
 
+class SegmentationUNet2(nn.Module):
+    """Handles segmentation and regression."""
+
+    
+    def __init__(self, in_channels: int, base_channels: int = 64):
+        super().__init__()
+        # Encoder
+        self.enc1 = DoubleConv(in_channels, base_channels)
+        self.enc2 = DoubleConv(base_channels, base_channels * 2)
+
+        # Bottleneck
+        self.bottleneck = DoubleConv(base_channels * 2, base_channels * 4)
+
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(base_channels * 4, base_channels * 2)
+
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(base_channels * 2, base_channels)
+
+        # Output layer
+        self.classifier = nn.Conv2d(base_channels, 2, kernel_size=1)
+        self.regressor = nn.Conv2d(base_channels, 1, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        x1 = self.enc1(x)
+        x2 = self.enc2(F.max_pool2d(x1, 2))
+
+        # Bottleneck
+        b = self.bottleneck(F.max_pool2d(x2, 2))
+
+        # Decoder
+
+        d2 = self.up2(b)
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))
+
+        return {"zeta_mask": self.classifier(d1), "zeta": F.relu(self.regressor(d1))}
+
+def SegmentedLoss(positive_weight, regression_weight=.5):
+    """Segmented loss criterion."""
+    mse_loss = nn.MSELoss()
+    def loss_fn(preds, target):
+        mask = target["zeta_mask"].bool()
+        seg_loss = nn.CrossEntropyLoss(weight=torch.Tensor([1-positive_weight, positive_weight]).cuda(mask.device))
+        err_seg = seg_loss(preds["zeta_mask"], mask.squeeze(1).long())
+        batch_size = mask.shape[0]
+        image_reg_losses = []
+        for i in range(batch_size):
+            masked_pred = preds["zeta"][i][mask[i]]
+            masked_target = target["zeta"][i][mask[i]]
+            if masked_pred.numel() > 0:
+                image_reg_losses.append(mse_loss(masked_pred, masked_target))
+
+        if len(image_reg_losses):
+            reg_loss = torch.stack(image_reg_losses).mean()
+            #print("cross entropy loss", err_seg, "regression loss", reg_loss)
+            return (1-regression_weight) * err_seg + regression_weight * reg_loss
+        else:
+            return err_seg
+
+    return loss_fn
+    
