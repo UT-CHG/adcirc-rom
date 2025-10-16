@@ -85,12 +85,12 @@ class HollandWinds:
         """
         # do interpolation
         ind = t/self.dt
-        if ind < 0 or ind >= len(self.lat):
+        last = int(math.floor(ind))
+        curr = last + 1
+        if last < 0 or curr >= len(self.lat):
             # out of bounds - zero winds and background pressure
             return np.zeros_like(lats), np.zeros_like(lats), np.full_like(lats, pback)
 
-        last = int(math.floor(ind))
-        curr = int(math.ceil(ind))
         lam = ind-last
         vmax = (1-lam) * self.vmax[last] + lam * self.vmax[curr]
         rmaxh = (1-lam) * self.rmax[last] + lam * self.rmax[curr]

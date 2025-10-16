@@ -108,12 +108,14 @@ class VisionNet(nn.Module):
                  input_channels,
                  hidden_layers,
                  hidden_channels=32,
-                 kernel_size=3
+                 kernel_size=3,
+                 mask = False
                  ):
     
         super().__init__()
        
         self.layers = []
+        self.mask = mask
 
         for i in range(hidden_layers):
             layer_in_channels = input_channels if not i else hidden_channels
@@ -130,7 +132,10 @@ class VisionNet(nn.Module):
         sea_mask = (x[:,0,...] > -10).unsqueeze(1)
         x = self._encoder(x)
         pred = F.relu(self.regressor(x))
-        return pred * sea_mask
+        if self.mask:
+            return {"zeta": pred}
+        else:
+            return pred * sea_mask
         #return self.classifier(x), F.relu(self.regressor(x))
 
 import torch
@@ -208,6 +213,48 @@ class UNet4(nn.Module):
 
         return F.relu(self.out_conv(d1)) * sea_mask
 
+class UNet2(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int = 1, base_channels: int = 64, mask=False):
+        super().__init__()
+        self.mask = mask
+        # Encoder
+        self.enc1 = DoubleConv(in_channels, base_channels)
+        self.enc2 = DoubleConv(base_channels, base_channels * 2)
+ 
+        # Bottleneck
+        self.bottleneck = DoubleConv(base_channels * 2, base_channels * 4)
+
+        # Decoder
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(base_channels * 4, base_channels * 2)
+
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(base_channels * 2, base_channels)
+
+        # Output layer
+        self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        # filter out land from sea
+        sea_mask = (x[:,0,...] > -10).unsqueeze(1)
+        x1 = self.enc1(x)
+        x2 = self.enc2(F.max_pool2d(x1, 2))
+
+        # Bottleneck
+        b = self.bottleneck(F.max_pool2d(x2, 2))
+
+        # Decoder
+        d2 = self.up2(b)
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))
+        if self.mask:
+            return {"zeta": F.relu(self.out_conv(d1))}    
+        else: return F.relu(self.out_conv(d1)) * sea_mask
+
+
 class SegmentationUNet2(nn.Module):
     """Handles segmentation and regression."""
 
@@ -272,4 +319,15 @@ def SegmentedLoss(positive_weight, regression_weight=.5):
             return err_seg
 
     return loss_fn
-    
+
+def MaskedLoss(mask_weight=.99):
+    """Masked loss criterion"""
+    mse_loss = nn.MSELoss()
+    def loss_fn(preds, target):
+        mask = target["zeta_mask"].bool()
+        masked_pred = preds["zeta"][mask]
+        masked_target = target["zeta"][mask]
+        if mask.numel() > 0:
+            return mask_weight * mse_loss(masked_pred, masked_target) + (1-mask_weight) * mse_loss(preds["zeta"], target["zeta"])
+
+    return loss_fn

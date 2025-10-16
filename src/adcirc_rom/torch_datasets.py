@@ -16,7 +16,7 @@ class SyntheticTCDataset(Dataset):
     
     UNREADABLE_FILES = ['107.hdf5', '160.hdf5', '304.hdf5', '354.hdf5', '543.hdf5']
 
-    def __init__(self, folder, val=False, test=False, seed=36):
+    def __init__(self, folder, val=False, test=False, seed=36, **kwargs):
         self.folder = folder
         self.val = val
         self.test = test
@@ -111,9 +111,11 @@ class SyntheticTCDataset(Dataset):
         with h5py.File(outname, "w") as ds:
             if type(target) is dict:
                 ds["zeta_true"] = target["zeta"].cpu().numpy()
-                ds["zeta_mask"] = target["zeta_mask"].cpu().numpy()
                 ds["zeta_pred"] = preds["zeta"].cpu().numpy()
-                ds["zeta_pred_mask"] = preds["zeta_mask"].cpu().numpy()
+                if "zeta_mask" in target:
+                    ds["zeta_mask"] = target["zeta_mask"].cpu().numpy()
+                if "zeta_mask" in preds:
+                    ds["zeta_pred_mask"] = preds["zeta_mask"].cpu().numpy()
             else:
                 ds["zeta_true"] = target.cpu().numpy()
                 ds["zeta_pred"] = preds.cpu().numpy()
@@ -122,6 +124,11 @@ class SyntheticTCDataset(Dataset):
 class VisionTCDataset(SyntheticTCDataset):
     """Dataset appropriate for use with CNN"""
 
+    def __init__(self, folder, segment=False, mask=False, **kwargs):
+        self._segment = segment
+        self._mask = mask
+        super().__init__(folder, **kwargs)
+    
     def __getitem__(self, idx):
         """Load data for a storm into memory"""
 
@@ -139,14 +146,21 @@ class VisionTCDataset(SyntheticTCDataset):
                 if k.endswith("amplitude"):
                     arrs.append(ds[k][:][np.newaxis, ...])
 
-            if "zeta_mask" in ds.keys():
+            if "coastal_mask" in ds.keys():
                 arrs.append(ds["land_mask"][:][np.newaxis, ...])
-                arrs.append(ds["coastal_mask"][:][np.newaxis, ...])
-                return {
-                    "zeta": torch.Tensor(zeta),
-                    "zeta_mask": torch.Tensor(ds["zeta_mask"][:])}, torch.Tensor(np.concatenate(arrs, axis=0))
+                arrs.append(ds["coastal_mask"][:][np.newaxis, ...])                
+
+            features = torch.Tensor(np.concatenate(arrs, axis=0))
+            if self._segment:
+                zeta = {"zeta": torch.Tensor(zeta)}
+                if self._mask:
+                    zeta["zeta_mask"] = torch.Tensor(ds["coastal_mask"][:])
+                else:
+                    zeta["zeta_mask"] = torch.Tensor(ds["zeta_mask"][:])
             else:
-                return torch.Tensor(zeta), torch.Tensor(np.concatenate(arrs, axis=0)) 
+                zeta = torch.Tensor(zeta)
+
+            return zeta, features
 
     def num_channels(self):
         _, feats = self[0]

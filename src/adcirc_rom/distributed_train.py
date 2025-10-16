@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
     parser.add_argument('--local_rank', default=-1, type=int, help='local rank for distributed training')
     parser.add_argument("--segment", action="store_true", help="Train with segmented objective.")
+    parser.add_argument("--mask", action="store_true", help="Train with masked objective.")
     args = parser.parse_args()
     return args
 
@@ -101,7 +102,7 @@ def main(args):
         collate_fn = models.tc_collate_fn
     elif args.net == 'vision':
         num_channels = VisionTCDataset(args.datadir).num_channels()
-        model = models.VisionNet(input_channels=num_channels, hidden_layers=6, hidden_channels=64)
+        model = models.VisionNet(input_channels=num_channels, hidden_layers=6, hidden_channels=64, mask=args.mask)
         dataset_class = VisionTCDataset
         collate_fn = None
     elif args.net == 'unet':
@@ -111,10 +112,13 @@ def main(args):
             model = models.SegmentationUNet2(in_channels=num_channels)
             collate_fn = segment_collate_fn
         else:
-            model = models.UNet4(in_channels=num_channels)
+            model = models.UNet2(in_channels=num_channels, mask=args.mask)
             collate_fn = None
 
-    if args.segment:
+    if args.mask:
+        args.segment = True
+        criterion = models.MaskedLoss()
+    elif args.segment:
         criterion = models.SegmentedLoss(positive_weight=.9, regression_weight=.1)
     else:
         criterion = nn.MSELoss()
@@ -152,9 +156,9 @@ def main(args):
     scheduler = CosineAnnealingLR(optimizer, T_max=10) # add this to adjustable learning rate
     
     ### data loading ###
-    train_dataset = dataset_class(args.datadir, seed=args.seed)
-    val_dataset = dataset_class(args.datadir, val=True, seed=args.seed)
-    test_dataset = dataset_class(args.datadir, test=True, seed=args.seed)
+    train_dataset = dataset_class(args.datadir, seed=args.seed, segment=args.segment, mask=args.mask)
+    val_dataset = dataset_class(args.datadir, val=True, seed=args.seed, segment=args.segment, mask=args.mask)
+    test_dataset = dataset_class(args.datadir, test=True, seed=args.seed, segment=args.segment, mask=args.mask)
 
 
     train_sampler = data.distributed.DistributedSampler(train_dataset, shuffle=True)
