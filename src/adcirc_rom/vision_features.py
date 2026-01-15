@@ -9,7 +9,7 @@ from sklearn.neighbors import BallTree
 import pickle
 import os
 from global_land_mask import globe
-from constants import earth_radius
+from constants import earth_radius, BASINS
 
 # TODO - add functions for visualization of gridded features
 # TODO - analyze time of zeta max (relative to time of landfall)
@@ -23,6 +23,7 @@ class StormData:
         self.landfall_row = landfall
         self.zeta = zeta
         self.zeta_time = zeta_time
+        self.basin_str = BASINS[int(landfall['basin'])]
         self._precise_landfall()
     
     def _precise_landfall(self):
@@ -224,7 +225,8 @@ class VisionFeatures:
             "lon": grid_lons,
             "landfall_hour": landfall_hour,
             "landfall_lat": landfall_lat,
-            "landfall_lon": landfall_lon
+            "landfall_lon": landfall_lon,
+            "basin": storm.basin_str
         }
         
         arrs_to_interp = {
@@ -358,5 +360,6 @@ if __name__ == "__main__":
 
     create_dataset(
             "/scratch/08009/bpachev/global_tcs_v2/",
-            "/scratch/08009/bpachev/global_tcs_datasets/test_segmented",
+            "/scratch/08009/bpachev/global_tcs_datasets/full_segmented",
+            segment_land_dist=5
     )

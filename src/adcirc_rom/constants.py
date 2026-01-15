@@ -7,5 +7,6 @@ SUPPORTED_MODELS = {
     "xgb30": {"n_estimators": 30, "n_jobs": 32, "early_stopping_rounds": 10},
     "dummy": {},
 }
+BASINS = ["EP", "NA", "NI", "SI", "SP", "WP"]
 
 earth_radius = 6731

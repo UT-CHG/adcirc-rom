@@ -11,7 +11,7 @@ from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
 import matplotlib.pyplot as plt
 
 import os
-
+import gc
 
 # -------------------------------------------------------------------------
 # Const
